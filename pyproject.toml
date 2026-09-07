@@ -1,0 +1,9 @@
+[project]
+name = "paxos-playground"
+version = "0.1.0"
+description = "Networking scaffolding for implementing Paxos yourself"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

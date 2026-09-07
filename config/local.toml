@@ -1,0 +1,16 @@
+[network]
+timeout = 3.0
+max_message_bytes = 1048576
+inbox_size = 1024
+
+[nodes.n1]
+host = "127.0.0.1"
+port = 9001
+
+[nodes.n2]
+host = "127.0.0.1"
+port = 9002
+
+[nodes.n3]
+host = "127.0.0.1"
+port = 9003

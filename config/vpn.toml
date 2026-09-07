@@ -1,0 +1,18 @@
+# Replace these addresses with your hosts' actual VPN IPs.
+# Use the same node table on every host.
+[network]
+timeout = 3.0
+max_message_bytes = 1048576
+inbox_size = 1024
+
+[nodes.n1]
+host = "10.8.0.1"
+port = 9001
+
+[nodes.n2]
+host = "10.8.0.2"
+port = 9002
+
+[nodes.n3]
+host = "10.8.0.3"
+port = 9003
