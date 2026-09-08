@@ -67,12 +67,9 @@ class AlgorithmChecks(unittest.IsolatedAsyncioTestCase):
     async def test_single_proposer_with_prompt_delivery(self):
         await self.network.nodes["n1"].propose("A")
         await self.network.drain()
-        self.assertTrue(
-            any("accepted by majority" in line for line in self.output.getvalue().splitlines()),
-            "A single proposal with prompt delivery never reports a majority",
-        )
+        self.assert_only_one_value_has_acceptance_majorities(require_choice=True)
 
-    def assert_only_one_value_has_acceptance_majorities(self):
+    def assert_only_one_value_has_acceptance_majorities(self, *, require_choice=False):
         # Observe actual acceptance replies, independently of local decision logs.
         votes = {}
         for _, message in self.network.sent:
@@ -84,10 +81,13 @@ class AlgorithmChecks(unittest.IsolatedAsyncioTestCase):
             if len(senders) > len(QueuedTransport.peers) // 2
         }
         self.assertLessEqual(len(chosen), 1, f"Different values obtained majorities: {votes}")
+        if require_choice:
+            self.assertTrue(chosen, f"Scenario did not reach a first chosen value; acceptance replies: {votes}")
 
     async def test_chosen_value_survives_a_later_proposal(self):
         await self.network.nodes["n1"].propose("A")
         await self.network.drain()
+        self.assert_only_one_value_has_acceptance_majorities(require_choice=True)
         await self.network.nodes["n2"].propose("B")
         await self.network.drain()
         self.assert_only_one_value_has_acceptance_majorities()
@@ -108,6 +108,7 @@ class AlgorithmChecks(unittest.IsolatedAsyncioTestCase):
 
         await self.network.nodes["n1"].propose("A")
         await deliver_except_acceptance_replies()
+        self.assert_only_one_value_has_acceptance_majorities(require_choice=True)
         await self.network.nodes["n2"].propose("B")
         await deliver_except_acceptance_replies()
         # Release all delayed replies: this schedule loses no messages.
@@ -131,7 +132,7 @@ class AlgorithmChecks(unittest.IsolatedAsyncioTestCase):
             "20 ticks with reliable one-tick delivery produced zero promises",
         )
 
-    async def test_concurrent_proposals_do_not_mix_conflicting_promises(self):
+    async def test_concurrent_proposals_do_not_choose_different_values(self):
         await self.network.nodes["n1"].propose("A")
         await self.network.nodes["n2"].propose("B")
         batch = list(self.network.pending)
@@ -140,25 +141,17 @@ class AlgorithmChecks(unittest.IsolatedAsyncioTestCase):
         batch.sort(key=lambda item: not (item[0] == "n2" and item[1].sender == "n2"))
         await self.network.deliver(batch)
         await self.network.drain()
-        b_promisers = {
-            message.sender for _, message in self.network.sent
-            if message.kind == "promise" and message.payload["value"] == "B"
-        }
-        b_accepts = [
-            message for _, message in self.network.sent
-            if message.kind == "accept" and message.payload["value"] == "B"
-        ]
-        self.assertFalse(
-            b_accepts and len(b_promisers) <= len(QueuedTransport.peers) // 2,
-            f"B was sent for acceptance although only {sorted(b_promisers)} promised B; "
-            "promises for the conflicting A proposal were counted alongside it",
-        )
+        self.assert_only_one_value_has_acceptance_majorities()
 
     async def test_promises_from_different_numbers_do_not_form_a_majority(self):
         node = self.network.nodes["n1"]
         await node.propose("A")
-        await node.on_message(Message("n2", "promise", {"num": 1, "value": "A"}))
-        await node.on_message(Message("n3", "promise", {"num": 2, "value": "B"}))
+        for sender, num in (("n2", 1), ("n3", 2)):
+            await node.on_message(Message(sender, "promise", {
+                "num": num, "value": {
+                    "num": num, "accepted_n": None, "accepted_value": None,
+                },
+            }))
         accepts = [m for _, m in self.network.sent if m.kind == "accept"]
         self.assertFalse(
             accepts,
