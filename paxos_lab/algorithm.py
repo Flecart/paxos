@@ -82,17 +82,13 @@ class PaxosNode:
         elif kind == "accept":
             self.num = max(self.num, num)
             proposed_value = payload.get("value", None)
-            if self.proposed_value.get(num) == proposed_value:
-                if self.accepted_value is None or self.accepted_value == proposed_value:
-                    print(f"accepting value {proposed_value} from {sender} with num {num}")
-                    # self.accepted_value[num] = proposed_value
-                    self.proposed_value[num] = proposed_value
-                    self.accepted_value = proposed_value
-                    self.accepted_n = num
-                    failures = await self.transport.send(sender, "accepted", {"num": num, "value": self.proposed_value[num]})
-                else:
-                    print(f"rejecting value {proposed_value} from {sender} with num {num}, already accepted {self.accepted_value}")
-                    failures = await self.transport.send(sender, "reject", {"num": self.num})
+            if self.accepted_value is None or self.accepted_value == proposed_value:
+                print(f"accepting value {proposed_value} from {sender} with num {num}")
+                # self.accepted_value[num] = proposed_value
+                self.proposed_value[num] = proposed_value
+                self.accepted_value = proposed_value
+                self.accepted_n = num
+                failures = await self.transport.send(sender, "accepted", {"num": num, "value": self.proposed_value[num]})
             else:
                 print(f"conflicting values: {self.proposed_value} vs {payload.get('value', None)}")
                 await self.transport.send(sender, "reject", {"num": self.num})
