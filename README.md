@@ -1,5 +1,9 @@
 # Paxos playground
 
+For the bounded Python → reactive-modules → Lean model of the current learning
+implementation, see [formal/README.md](formal/README.md). It includes CSLib-based
+specifications, repeatable checks, and an explicit account of proof limitations.
+
 Python 3.11+, standard library only. Networking and configuration are implemented;
 **Paxos is not**. Edit `paxos_lab/algorithm.py` to implement it yourself.
 

@@ -1,0 +1,10 @@
+{
+  "non_none_acceptance_is_immutable": {
+    "negation": "unsat",
+    "evidence": "Z3 only; not a Lean theorem"
+  },
+  "acceptance_reply_matches_recorded_value": {
+    "negation": "unsat",
+    "evidence": "Z3 only; not a Lean theorem"
+  }
+}
