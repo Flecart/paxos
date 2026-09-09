@@ -1,8 +1,16 @@
 # Reactive-modules frontend contribution
 
+## RM-native protocol branch
+
+The project now pins `f4857be9477596e75e930c95ccab8e72bffe6a45` on
+`feat/rm-protocol-modules`. This adds `zrth.protocol`, ordered-atom RM export,
+selectable Z3/Lean checking, typed property obligations, kernel-checked numerical
+wire certificates, and an independently proved register. See [PROTOCOL.md](PROTOCOL.md).
+The original native compiler and its previous branch are retained unchanged.
+
 ## Direct native-source check
 
-The compiler is pinned to upstream contribution commit
+The native compiler increment was introduced at upstream contribution commit
 `91289f99b76f27abaf8ead91dc149b096dc85b69` on `feat/verified-python-handlers`.
 
 Run this from the Paxos project root:

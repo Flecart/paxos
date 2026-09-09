@@ -1,7 +1,7 @@
 import PaxosFormal.Semantics
 namespace PaxosFormal
 set_option maxRecDepth 100000
-def rmHash : String := "0582141f7a9769c0d759945ea798aeae892b8d018d531330aa46d73cd2816c33"
+def rmHash : String := "0162bbd226a7e732abaec128a036d32ad378a2407f6117740e8f9824deaf59f2"
 def stateSize : Nat := 721
 def queueCapacity : Nat := 32
 def statusIndex : Nat := 6

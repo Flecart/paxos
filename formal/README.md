@@ -1,5 +1,11 @@
 # Python → RM → Lean learning model
 
+## Direct RM protocol route
+
+The separate direct RM port and selectable Z3/Lean backends are documented in
+[PROTOCOL.md](PROTOCOL.md). Start with `formal/check_protocol.py --backend both`.
+This preserves the older native/legacy paths below and leaves algorithm.py intact.
+
 ## Check the unchanged algorithm directly
 
 ```sh
