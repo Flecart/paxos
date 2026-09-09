@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import os
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent
@@ -25,23 +26,23 @@ def compile_rm():
     import zrth
     from zrth.analyzer import convert_method
 
-    class ScalarLIA(zrth.LIATermBuilder):
-        # Pinned upstream builder.py:432 calls the nonexistent LIA.Const for
-        # Booleans. Use the actual LIA.Bool constructor, without editing upstream.
-        def const(self, tensor, output_wire=None):
-            if tensor.dtype == torch.bool:
-                tensor = tensor.reshape(1, 1)
-                wire = output_wire if output_wire is not None else zrth.Wire(zrth.Bool([1, 1]))
-                return zrth.Term.constant(zrth.LIA.Bool(tensor), [wire])
-            return super().const(tensor, output_wire=output_wire)
-
     manifest = json.loads((ROOT / "generated" / "manifest.json").read_text())
+    upstream = ROOT / ".cache" / "reactive-modules"
+    if not Path(zrth.__file__).resolve().is_relative_to(upstream.resolve()):
+        raise RuntimeError("Expected the pinned editable compiler; run formal/bootstrap.py")
+    actual_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=upstream, text=True).strip()
+    if actual_commit != manifest["rm_commit"]:
+        raise RuntimeError("Upstream revision differs from the manifest; bootstrap and regenerate")
+    changed = subprocess.check_output(
+        ["git", "status", "--porcelain", "--", "python/zrth"], cwd=upstream, text=True)
+    if changed:
+        raise RuntimeError("Compiler sources have uncommitted changes; commit and pin them before export")
     Node = load_node()
     names = list(manifest["initial"])
     inputs = manifest["inputs"]
     wires = {name: zrth.Var(zrth.Int([1, 1])) for name in names + inputs}
-    reset = convert_method(Node.reset, wires, [], cls=Node, builder=ScalarLIA())
-    step = convert_method(Node.step, wires, [], cls=Node, builder=ScalarLIA())
+    reset = convert_method(Node.reset, wires, [], cls=Node, builder=zrth.LIATermBuilder(), strict=True)
+    step = convert_method(Node.step, wires, [], cls=Node, builder=zrth.LIATermBuilder(), strict=True)
     rm = zrth.Module(init=reset, update=step, vars=list(wires.values()))
     if set(rm.ctrl) != {wires[n] for n in names}:
         raise RuntimeError("RM controlled variables differ from the generated state schema")

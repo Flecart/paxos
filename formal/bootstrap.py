@@ -18,6 +18,13 @@ def main():
     if not (REPO / ".git").exists():
         REPO.parent.mkdir(parents=True, exist_ok=True)
         run("git", "clone", "https://github.com/Flecart/reactive-modules.git", str(REPO))
+    dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=REPO, text=True)
+    if dirty:
+        raise SystemExit("Upstream checkout has local changes; commit or preserve them before bootstrap")
+    available = subprocess.run(["git", "cat-file", "-e", config["rm_commit"] + "^{commit}"],
+                               cwd=REPO, capture_output=True)
+    if available.returncode:
+        run("git", "fetch", "origin", cwd=REPO)
     run("git", "checkout", "--detach", config["rm_commit"], cwd=REPO)
     if not PYTHON.exists():
         run("uv", "venv", str(ROOT / ".venv"), "--python", "3.13")

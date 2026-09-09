@@ -1,6 +1,58 @@
 # Python → RM → Lean learning model
 
-This directory formalizes the current `paxos_lab/algorithm.py` without repairing
+## Check the unchanged algorithm directly
+
+```sh
+uv run --no-project --python formal/.venv/bin/python formal/check_native.py
+```
+
+This new path accepts the native dictionaries, sets, Counter, mutable fields,
+nested awaits, async helpers, exceptions, and retry decorators currently used in
+`paxos_lab/algorithm.py`. It does **not** use `generate.py` or require a manually
+updated algorithm hash. Editing the source regenerates its instruction model and
+RM graphs. The command checks translation in Lean, compares real Python and RM
+execution, and kernel-replays sampled object-machine instructions. Source failures
+are preserved; passing translation does not mean the algorithm is correct.
+
+`native.json` declares the transport/record/exception interfaces and value
+profile. Evidence is saved under ignored `formal/native-evidence/`.
+`--skip-lean` is a faster Python-only comparison run, explicitly not a proof.
+The full check takes several minutes. The current saved cases include 19
+scenarios and 180 instruction/reply samples, including returned failure maps,
+retry exhaustion, unhashable values, and source `KeyError`/`IndexError` paths.
+See [UPSTREAM.md](UPSTREAM.md) and upstream
+[NATIVE.md](.cache/reactive-modules/verification/NATIVE.md) for the architecture,
+supported inputs, and trusted parser/runtime/adapter boundaries. This is an
+RM-controlled object-machine backend, not a proof of CPython, TCP, or asyncio.
+
+The older bounded Paxos artifacts and their property statements below remain
+available separately; they have not been relabeled as proofs about the new model.
+
+## Other checked libraries
+
+For the new **generic typed-handler** pipeline, run:
+
+```sh
+uv run --no-project --python formal/.venv/bin/python formal/verify_libraries.py
+```
+
+This checks upstream's register, helper-in-loop fold register, and communicating-channel libraries, including
+translation preservation, unbounded safety, fair-loss liveness, and a checked
+negative example. See [UPSTREAM.md](UPSTREAM.md) for scope and setup.
+These library contracts are separate from the direct Paxos source check above.
+The generic compiler supports same-module typed helpers, fixed-tuple iteration,
+unpacking, literal indexing, and `len`. The separate `compile_coroutine` API now
+compiles typed async functions using top-level `await Request(...)` into actual
+RM segments, with checked heap/resumption composition and a universal
+dictionary round-trip proof. Native dictionary/set syntax, nested awaits, and
+async helper calls use the separate `compile_native` entrypoint described above.
+See upstream
+[ASYNC.md](.cache/reactive-modules/verification/ASYNC.md) for supported code and
+the explicit trusted frontend/runtime boundary.
+
+## Legacy bounded model
+
+The older pipeline formalizes `paxos_lab/algorithm.py` without repairing
 its algorithm. It is a **source-specific, bounded translation**, not a general
 Python compiler and not a proof that the implementation is correct.
 
@@ -53,13 +105,23 @@ source hash in `config.json`. After you edit the algorithm, **review and update
 the lowering**, then update the hash; changing the hash alone does not translate
 your change.
 
-The actual [reactive-modules compiler](https://github.com/Flecart/reactive-modules/tree/66bdb2d37d4c2fb925c103f8088b43653773d298)
-is pinned to `66bdb2d37d4c2fb925c103f8088b43653773d298`. A small local builder
-subclass works around that revision's nonexistent `LIA.Const` Boolean
-constructor by calling its real `LIA.Bool` constructor. No upstream source is
-edited. The export refuses unsupported RM operators. Python and Lean interpret
+The actual [reactive-modules compiler](https://github.com/Flecart/reactive-modules/tree/91289f99b76f27abaf8ead91dc149b096dc85b69)
+is pinned to `91289f99b76f27abaf8ead91dc149b096dc85b69` on the contribution
+branch `feat/verified-python-handlers`. We contributed opt-in strict scalar AST
+compilation and the LIA Boolean-constructor fix there. This project now uses
+`convert_method(..., strict=True)` and the upstream `LIATermBuilder` directly;
+there is no local builder workaround. Strict mode rejects unsupported statements
+and calls with source locations, including effects that the permissive frontend
+can skip or leave uninterpreted. The export also refuses unsupported RM operators.
+Python and Lean interpret
 the exported DAG with mathematical integers, not floating point or machine-word
 overflow. The DAG has 721 controlled state fields and 27,191 update terms.
+
+This legacy path is **not direct compilation of `algorithm.py`**. The new
+`check_native.py` path above is direct compilation through the reusable upstream
+object/async frontend. `generate.py` remains only for these existing bounded
+artifacts and their separate properties. None of the contributed compiler code
+contains Paxos protocol rules. See [UPSTREAM.md](UPSTREAM.md).
 
 The [CSLib dependency](https://github.com/leanprover/cslib/tree/d0c137a2e65bb13d906be55bcde4fecaa7972c0b)
 is pinned to `d0c137a2e65bb13d906be55bcde4fecaa7972c0b`, compatible with Lean

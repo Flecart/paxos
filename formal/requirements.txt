@@ -7,3 +7,4 @@ pysmt>=0.9.6,<1
 textual>=8.0.0,<9
 websockets>=15,<16
 z3-solver>=4.12,<5
+pytest>=9,<10
