@@ -1,6 +1,6 @@
 # Direct RM Paxos protocol module
 
-This route is independent of `generate.py` and of the object/async VM. Your
+This branch contains only the RM-native verification workflow. Your
 `paxos_lab/algorithm.py` is unchanged. `protocol_paxos.py` is a separate, manually
 authored symbolic RM port of its current logic, including its bugs. Changing the
 original does **not** automatically change this model: review the port and rerun
@@ -10,26 +10,19 @@ the saved differential checks. Source hashes record provenance, not equivalence.
 
 ```sh
 uv run --no-project --python formal/.venv/bin/python formal/check_protocol.py --backend z3 --out formal/protocol-evidence/z3
-uv run --no-project --python formal/.venv/bin/python formal/check_protocol.py --backend lean --timeout 600 --out formal/protocol-evidence/lean
+uv run --no-project --python formal/.venv/bin/python formal/check_protocol.py --backend lean --lean-timeout 600 --out formal/protocol-evidence/lean
 uv run --no-project --python formal/.venv/bin/python -m pytest -q formal/test_protocol_paxos.py formal/.cache/reactive-modules/python/tests/test_protocol.py
 ```
 
 Backend choices are `z3`, `lean`, and `both`. Options: `--profile small` (default)
-or `compatibility`, `--depth 16`, `--timeout 30` seconds per solver query, and
-`--out formal/protocol-evidence`. Lean checks have at least 120 seconds each;
-large witnesses may be reported unknown on timeout. Positive Paxos invariants
-without authored Lean proofs remain `not-run`; selecting Lean does not silently
-prove them. Z3 induction results and bounded searches are independently labeled.
-The commands above separate the budgets: this machine needed more than the
-default two minutes for the full Paxos numerical witness, so its Lean command
-allows ten minutes without also allowing ten minutes per SMT query.
-
-The old commands still work:
-
-```sh
-uv run --no-project --python formal/.venv/bin/python formal/check_native.py
-uv run --no-project --python formal/.venv/bin/python formal/verify.py
-```
+or `compatibility`, `--depth 16`, `--timeout 30` seconds per solver query,
+`--lean-timeout 600` seconds per Lean check, and `--out formal/protocol-evidence`.
+Timeouts return unknown. Small safety obligations get an automatic proof attempt,
+without a separate Lean proof file. The large Paxos safety obligations exceed
+the current symbolic expansion budget and return `unknown`; selecting Lean does
+not silently prove them. Z3 induction results and bounded searches are separately
+labeled. The retired verification routes are recoverable through Git; see
+[UPSTREAM.md](UPSTREAM.md).
 
 For a fresh environment use `python3 formal/bootstrap.py`, then build/fetch the
 existing Lean dependencies as described in README.md. Bootstrap checks out the

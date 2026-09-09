@@ -1,11 +1,11 @@
 # Paxos playground
 
-For the bounded Python → reactive-modules → Lean model of the current learning
-implementation, see [formal/README.md](formal/README.md). It includes CSLib-based
-specifications, repeatable checks, and an explicit account of proof limitations.
+For the separate RM-native protocol model and contract-driven Z3/Lean checks,
+see [formal/README.md](formal/README.md). The port is differentially tested against
+the original implementation; it is not a proof of arbitrary Python/asyncio.
 
-Python 3.11+, standard library only. Networking and configuration are implemented;
-**Paxos is not**. Edit `paxos_lab/algorithm.py` to implement it yourself.
+Networking and configuration are provided. `paxos_lab/algorithm.py` contains your
+learning implementation; the verification tooling does not repair it.
 
 ## Run locally
 
@@ -17,8 +17,7 @@ python3 -m paxos_lab --node n2
 python3 -m paxos_lab --node n3 --value '"hello"'
 ```
 
-Each process logs its listening address. Until you implement the hooks, nodes
-only listen; `--value` calls the empty `propose()` stub and produces no result.
+Each process logs its listening address; `--value` invokes its `propose()` hook.
 Start the other nodes before the process with `--value`. Stop with Ctrl+C;
 restart a process to submit another startup proposal. State is currently only
 in memory; persistence is up to your implementation.

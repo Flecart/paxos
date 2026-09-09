@@ -1,9 +1,3 @@
 {
-  "source_sha256": "6e2d1428b96635d7324396efd2e887b03c5ad26157731b8de76dbbc1afa0ddd2",
-  "rm_commit": "f4857be9477596e75e930c95ccab8e72bffe6a45",
-  "max_number": 31,
-  "max_count": 31,
-  "queue_capacity": 32,
-  "nodes": ["n1", "n2", "n3"],
-  "values": [null, "A", "B", 0, 1, 2]
+  "rm_commit": "70802f324410c26f7e473e509e55f750bf7069ce"
 }

@@ -158,47 +158,81 @@ def test_capacity_is_explicit(network):
     assert sim.state["out_of_scope"]==1
 
 
-def test_network_against_saved_reference(network):
-    from runtime import Network
+def test_network_against_original_coroutines(network):
+    # The oracle runs algorithm.py itself, not another hand-written Paxos model.
+    def packet(s,j):
+        kind=next(k for k,v in KINDS.items() if v==s[f"q{j}_kind"])
+        payload={"num":s[f"q{j}_num"]}
+        if kind in ("accept","accepted"): payload["value"]=VALUES[s[f"q{j}_value"]]
+        if kind=="promise":
+            payload["value"]={"num":s[f"q{j}_num"],
+                "accepted_n":None if s[f"q{j}_prior_n"]==-1 else s[f"q{j}_prior_n"],
+                "accepted_value":VALUES[s[f"q{j}_prior_v"]]}
+        return (s[f"q{j}_sender"],s[f"q{j}_target"],kind,payload)
+
     for seed in range(8):
-        rng=random.Random(seed); reference=Network(); sim=Simulation(network)
-        for t in range(90):
-            options=[("idle",)]
-            for n,node in enumerate(reference.nodes):
-                if node.status: continue
-                if node.pc:
-                    if not reference.outstanding[n]: options.append(("resume",n))
+        rng=random.Random(seed); sim=Simulation(network)
+        ports=[Port() for _ in range(3)]
+        for n,port in enumerate(ports): port.node_id=f"n{n+1}"
+        nodes=[PaxosNode(port) for port in ports]
+        tasks=[None]*3; suspended=[None]*3; failed=[None]*3
+        pending=[]; inboxes=[[] for _ in nodes]
+        def advance_node(n,reply=None):
+            result=advance(tasks[n],reply)
+            suspended[n]=result if isinstance(result,Request) else None
+            if isinstance(result,Request):
+                if result.method=="broadcast":
+                    assert result.kwargs=={"include_self":True}
+                    kind,payload=result.args
+                    pending.extend((n,r,kind,copy.deepcopy(payload)) for r in range(3))
                 else:
-                    if reference.inboxes[n]: options.append(("receive",n))
-                    if t<8: options.append(("propose",n,1+n%2))
-            options.extend(("deliver",j) for j in range(len(reference.pending)))
-            action=rng.choice(options)
-            inp=dict(action=0,node=0,value=0,slot=0)
-            if action[0]=="deliver":
-                packet=reference.pending[action[1]]
-                matches=[j for j in range(6) if sim.state[f"q{j}_phase"]==1 and
-                    all(sim.state[f"q{j}_{k}"]==v for k,v in dict(sender=packet.sender,target=packet.recipient,
-                        kind=packet.kind,num=packet.num,value=packet.value,prior_n=packet.prior_n,prior_v=packet.prior_v).items())]
-                assert matches
-                inp.update(action=4,slot=matches[0])
-            elif action[0]!="idle":
-                inp.update(action={"propose":1,"resume":3,"receive":5}[action[0]],node=action[1])
-                if action[0]=="propose": inp["value"]=action[2]
-            reference.act(action); sim.step(**inp)
-            if sim.state["out_of_scope"]: break
-            assert sim.state["invalid"]==0
-            for n,node in enumerate(reference.nodes):
-                for k in node_schema(3):
-                    legacy=k
-                    if k.startswith("cand_") and not k.startswith("cand_has_"):
-                        _,r,kind,*v=k.split("_")
-                        legacy=f"next_rank_{r}" if kind=="next" else f"{kind}_{r}_{v[0]}"
-                    assert sim.state[f"n{n}_{k}"]==getattr(node,legacy),(action,n,k)
-            pending_count=sum(sim.state[f"q{j}_phase"]==1 for j in range(6))
-            assert pending_count==len(reference.pending)
-            for n in range(3):
-                actual=sorted((sim.state[f"q{j}_order"],j) for j in range(6)
-                    if sim.state[f"q{j}_phase"]==2 and sim.state[f"q{j}_target"]==n)
-                assert [r for r,j in actual]==list(range(len(reference.inboxes[n])))
-                for (_,j),packet in zip(actual,reference.inboxes[n]):
-                    assert sim.state[f"q{j}_sender"]==packet.sender and sim.state[f"q{j}_kind"]==packet.kind
+                    recipient,kind,payload=result.args
+                    pending.append((n,int(recipient[1:])-1,kind,copy.deepcopy(payload)))
+            elif result!="done": failed[n]=result
+        try:
+            for t in range(90):
+                options=[("idle",)]
+                for n in range(3):
+                    if failed[n]: continue
+                    if suspended[n]:
+                        if not any(p[0]==n for p in pending): options.append(("resume",n))
+                    else:
+                        if inboxes[n]: options.append(("receive",n))
+                        if t<8: options.append(("propose",n,1+n%2))
+                options.extend(("deliver",j) for j in range(len(pending)))
+                action=rng.choice(options); inp=dict(action=0,node=0,value=0,slot=0)
+                if action[0]=="deliver":
+                    p=pending.pop(action[1])
+                    matches=[j for j in range(6) if sim.state[f"q{j}_phase"]==1 and packet(sim.state,j)==p]
+                    assert matches
+                    inp.update(action=4,slot=matches[0]); inboxes[p[1]].append(p)
+                elif action[0]!="idle":
+                    n=action[1]
+                    inp.update(action={"propose":1,"resume":3,"receive":5}[action[0]],node=n)
+                    if action[0]=="resume":
+                        advance_node(n,{} if suspended[n].method=="broadcast" else None)
+                    else:
+                        if action[0]=="propose":
+                            inp["value"]=action[2]; tasks[n]=nodes[n].propose(VALUES[action[2]])
+                        else:
+                            sender,_,kind,payload=inboxes[n].pop(0)
+                            tasks[n]=nodes[n].on_message(Message(f"n{sender+1}",kind,payload))
+                        advance_node(n)
+                sim.step(**inp)
+                if sim.state["out_of_scope"]: break
+                assert sim.state["invalid"]==0
+                for n,node in enumerate(nodes):
+                    local={k:sim.state[f"n{n}_{k}"] for k in node_schema(3)}
+                    decoded=decode(local,3)
+                    assert decoded=={k:getattr(node,k) for k in decoded},(seed,t,action,n)
+                    assert bool(local["pc"])==bool(suspended[n])
+                    assert local["fault"]=={None:0,"KeyError":1,"IndexError":2}[failed[n]]
+                    actual=sorted((sim.state[f"q{j}_order"],j) for j in range(6)
+                        if sim.state[f"q{j}_phase"]==2 and sim.state[f"q{j}_target"]==n)
+                    assert [rank for rank,_ in actual]==list(range(len(inboxes[n])))
+                    assert [packet(sim.state,j) for _,j in actual]==inboxes[n]
+                actual=[packet(sim.state,j) for j in range(6) if sim.state[f"q{j}_phase"]==1]
+                assert sorted(map(repr,actual))==sorted(map(repr,pending))
+        finally:
+            for task in tasks:
+                if task is not None: task.close()
