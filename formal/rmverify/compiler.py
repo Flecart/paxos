@@ -73,12 +73,11 @@ def run_graph(graph, values):
     return [env[i] for i in graph["outputs"]]
 
 
-def compile_program(program):
+def native_terms(expressions, input_sorts, inputs):
     import torch  # Load libtorch before the extension.
     import zrth as rm
 
     def sort(kind): return (rm.Bool if kind == "bool" else rm.Int)([1, 1])
-    inputs = [rm.Var(sort(k)) for k in program.inputs]
     terms, cache = [], {}
 
     def term(op, reads, kind):
@@ -110,7 +109,7 @@ def compile_program(program):
 
     def wire(e):
         if e in cache: return cache[e]
-        kind = expression_sort(e, program.inputs)
+        kind = expression_sort(e, input_sorts)
         match e:
             case ("var", i): result = inputs[i]
             case ("lit", n): result = constant(n)
@@ -121,7 +120,7 @@ def compile_program(program):
                 if n is None: n, value = coefficient(b), a
                 if n is None: raise ValueError("nonlinear multiplication")
                 result = scaled(wire(value), n)
-            case ("bin", op, a, b) if op in ("eq", "ne") and expression_sort(a, program.inputs) == "bool":
+            case ("bin", op, a, b) if op in ("eq", "ne") and expression_sort(a, input_sorts) == "bool":
                 left, right = wire(a), wire(b)
                 negated = term(rm.LIA.Not(), [right], "bool")
                 result = term(rm.LIA.Ite(), [left, right, negated] if op == "eq" else [left, negated, right], "bool")
@@ -132,13 +131,56 @@ def compile_program(program):
         cache[e] = result
         return result
 
+    values = [wire(e) for e in expressions]
+    return terms, values
+
+
+def export_terms(terms, inputs, input_sorts, outputs):
+    import torch
+    import zrth as rm
+
+    def sort(kind): return (rm.Bool if kind == "bool" else rm.Int)([1, 1])
+    # Read back the real ordered RM atoms, never the compiler's expression list.
+    bindings = {w: i for i, w in enumerate(inputs)}
+    rows, sorts = [], list(input_sorts)
+    for t in terms:
+        if len(t.write) != 1 or t.write[0] in bindings: raise ValueError("invalid RM controller")
+        args = [("var", bindings[w]) for w in t.read]
+        match t.itype, args:
+            case rm.LIA.Int(n), []: expression = ("lit", int(n.item()))
+            case rm.LIA.Bool(b), []: expression = ("bool", bool(b.item()))
+            case rm.LIA.Linear(weight, bias), [a]:
+                if list(weight.shape) != [1, 1] or list(bias.shape) != [1, 1]:
+                    raise ValueError("only scalar affine terms are supported")
+                expression = ("bin", "add", ("bin", "mul", ("lit", int(weight.item())), a), ("lit", int(bias.item())))
+            case rm.LIA.Id(), [a]: expression = a
+            case rm.LIA.Not(), [a]: expression = ("ite", a, ("bool", False), ("bool", True))
+            case rm.LIA.Ite(), [c, a, b]: expression = ("ite", c, a, b)
+            case op, [a, b]:
+                name = {"LIA_Add":"add", "LIA_Sub":"sub", "LIA_Eq":"eq", "LIA_Ne":"ne", "LIA_Lt":"lt", "LIA_Le":"le", "LIA_Gt":"gt", "LIA_Ge":"ge", "LIA_And":"and", "LIA_Or":"or"}.get(type(op).__name__)
+                if name is None: raise ValueError(f"unsupported RM operator {op}")
+                expression = ("bin", name, a, b)
+            case _: raise ValueError(f"unsupported RM term {t}")
+        kind = expression_sort(expression, sorts)
+        if t.write[0].dtype != sort(kind): raise ValueError("RM output sort mismatch")
+        bindings[t.write[0]] = len(sorts)
+        rows.append(expression)
+        sorts.append(kind)
+    return dict(inputs=input_sorts, terms=rows,
+                outputs=[bindings[w] for w in outputs],
+                sorts=[sorts[bindings[w]] for w in outputs])
+
+
+def compile_program(program):
+    import torch
+    import zrth as rm
+
+    def sort(kind): return (rm.Bool if kind == "bool" else rm.Int)([1, 1])
+    inputs = [rm.Var(sort(k)) for k in program.inputs]
     expressions = lower(program)
-    outputs = []
-    for e in expressions:
-        output = rm.Var(sort(expression_sort(e, program.inputs)))
-        source = wire(e)
-        terms.append(rm.Term(rm.LIA.Id(), [rm.X(output)], [source]))
-        outputs.append(output)
+    terms, values = native_terms(expressions, program.inputs, inputs)
+    outputs = [rm.Var(sort(expression_sort(e, program.inputs))) for e in expressions]
+    terms += [rm.Term(rm.LIA.Id(), [rm.X(w)], [value]) for w,value in zip(outputs,values,strict=True)]
     initial = terms
     if not program.initialize:
         initial = [rm.Term(rm.LIA.Bool(torch.tensor([[False]], dtype=torch.bool)) if w.dtype == sort("bool") else rm.LIA.Int(torch.tensor([[0]], dtype=torch.int64)), [rm.X(w)], []) for w in outputs]
@@ -148,33 +190,89 @@ def compile_program(program):
     atoms = list(module.atoms)
     if any(type(t.itype).__name__ != "Differential_ZERO" for atom in atoms for t in atom.delay):
         raise ValueError("continuous dynamics are unsupported")
-    # Read back the real ordered RM atoms, never the compiler's expression list.
-    bindings = {w: i for i, w in enumerate(inputs)}
-    rows, sorts = [], list(program.inputs)
-    for atom in atoms:
-        for t in (atom.init if program.initialize else atom.update):
-            if len(t.write) != 1 or t.write[0] in bindings: raise ValueError("invalid RM controller")
-            args = [("var", bindings[w]) for w in t.read]
-            match t.itype, args:
-                case rm.LIA.Int(n), []: expression = ("lit", int(n.item()))
-                case rm.LIA.Bool(b), []: expression = ("bool", bool(b.item()))
-                case rm.LIA.Linear(weight, bias), [a]:
-                    if list(weight.shape) != [1, 1] or list(bias.shape) != [1, 1]:
-                        raise ValueError("only scalar affine terms are supported")
-                    expression = ("bin", "add", ("bin", "mul", ("lit", int(weight.item())), a), ("lit", int(bias.item())))
-                case rm.LIA.Id(), [a]: expression = a
-                case rm.LIA.Not(), [a]: expression = ("ite", a, ("bool", False), ("bool", True))
-                case rm.LIA.Ite(), [c, a, b]: expression = ("ite", c, a, b)
-                case op, [a, b]:
-                    name = {"LIA_Add":"add", "LIA_Sub":"sub", "LIA_Eq":"eq", "LIA_Ne":"ne", "LIA_Lt":"lt", "LIA_Le":"le", "LIA_Gt":"gt", "LIA_Ge":"ge", "LIA_And":"and", "LIA_Or":"or"}.get(type(op).__name__)
-                    if name is None: raise ValueError(f"unsupported RM operator {op}")
-                    expression = ("bin", name, a, b)
-                case _: raise ValueError(f"unsupported RM term {t}")
-            kind = expression_sort(expression, sorts)
-            if t.write[0].dtype != sort(kind): raise ValueError("RM output sort mismatch")
-            bindings[t.write[0]] = len(sorts)
-            rows.append(expression)
-            sorts.append(kind)
-    return dict(inputs=program.inputs, terms=rows,
-                outputs=[bindings[rm.X(w)] for w in outputs],
-                sorts=[expression_sort(e, program.inputs) for e in expressions])
+    return export_terms([t for atom in atoms for t in (atom.init if program.initialize else atom.update)],
+                        inputs, program.inputs, [rm.X(w) for w in outputs])
+
+
+def compile_composition(model):
+    """Build persistent native atoms, compose them, then export the actual atoms.
+
+    AnyBool is internal wire nondeterminism, never an external scheduler port.
+    Its complete finite domain is exported as a disjunction of ordered graphs.
+    """
+    from itertools import product
+    import re
+    import torch
+    import zrth as rm
+    from .frontend import Unsupported
+
+    kinds = list(model["fields"].values())
+    count = len(kinds)
+    variables = [rm.Var((rm.Bool if k == "bool" else rm.Int)([1, 1])) for k in kinds]
+    indices = {v: i for i,v in enumerate(variables)}
+    inputs = variables + [rm.X(v) for v in variables]
+
+    def block(alternatives, controls):
+        # A balanced choice tree needs only ceil(log2(n)) independent bits.
+        if len(alternatives) > 256:
+            raise Unsupported("more than 256 atom alternatives")
+        bits = (len(alternatives)-1).bit_length()
+        alternatives += [alternatives[-1]] * (2**bits - len(alternatives))
+        choices = [rm.Wire(rm.Bool([1, 1])) for _ in range(bits)]
+        terms = [rm.Term(rm.LIA.AnyBool([1, 1]), [w], []) for w in choices]
+
+        def select(rows, level=0):
+            if len(rows) == 1:
+                return rows[0]
+            left = select(rows[:len(rows)//2], level+1)
+            right = select(rows[len(rows)//2:], level+1)
+            return [("ite", ("var", 2*count+level), a, b) for a,b in zip(left,right,strict=True)]
+
+        compiled, values = native_terms(select(alternatives), kinds+kinds+["bool"]*bits, inputs+choices)
+        terms += compiled
+        terms += [rm.Term(rm.LIA.Id(), [rm.X(variables[j])], [v]) for j,v in zip(controls,values,strict=True)]
+        return terms
+
+    parts = []
+    for atom in model["atoms"]:
+        controls = atom["controls"]
+        initial = [lower(model["programs"][a["index"]])[:-1] for a in atom["initial"]]
+        updates = [[("var", j) for j in controls]] if atom["stutter"] else []
+        for action in atom["actions"]:
+            bindings = [("var", j) for j in controls]
+            bindings += [("var", p["variable"] + (count if p["awaited"] else 0)) for p in action["ports"]]
+            updates.append([substitute(e, bindings) for e in lower(model["programs"][action["index"]])[:-1]])
+        parts.append(rm.Module(init=block(initial, controls), update=block(updates, controls), vars=variables))
+    composed = rm.Module.compose(*parts)
+    if set(composed.ctrl) != set(variables) or list(composed.extl) or list(composed.prvt):
+        raise ValueError("native composition has an unexpected interface")
+    native_atoms = list(composed.atoms)
+    if len(native_atoms) != len(model["atoms"]):
+        raise ValueError("native composition changed atom boundaries")
+    graphs = []
+    for atom in model["atoms"]:
+        owned = {variables[j] for j in atom["controls"]}
+        native = next((a for a in native_atoms if set(a.ctrl) == owned), None)
+        if native is None:
+            raise ValueError("native composition changed ownership")
+        reads, awaits = sorted(indices[v] for v in native.read), sorted(indices[v] for v in native.wait)
+        if not set(reads) <= set(atom["reads"]) or not set(awaits) <= set(atom["awaits"]):
+            raise ValueError("native composition introduced undeclared dependencies")
+        atom["reads"], atom["awaits"] = reads, awaits
+        atom["native_text"] = re.sub(r"\x1b\[[0-9;]*m", "", native.show(dict(zip(variables, model["fields"]))))
+        atom["native_inputs"] = [dict(variable=j, awaited=False) for j in range(count)] + [dict(variable=j, awaited=True) for j in awaits]
+        for label, terms in (("initial", list(native.init)), ("update", list(native.update))):
+            choices = [t.write[0] for t in terms if type(t.itype).__name__ == "LIA_AnyBool"]
+            if len(choices) > 8:
+                raise Unsupported("more than 8 native Boolean choice wires")
+            ports = [] if label == "initial" else atom["native_inputs"]
+            input_wires = [rm.X(variables[p["variable"]]) if p["awaited"] else variables[p["variable"]] for p in ports]
+            atom["native_"+label] = []
+            for values in product((False, True), repeat=len(choices)):
+                bindings = dict(zip(choices, values))
+                concrete = [rm.Term(rm.LIA.Bool(torch.tensor([[bindings[t.write[0]]]], dtype=torch.bool)), t.write, [])
+                            if type(t.itype).__name__ == "LIA_AnyBool" else t for t in terms]
+                atom["native_"+label].append(len(graphs))
+                graphs.append(export_terms(concrete, input_wires, [kinds[p["variable"]] for p in ports],
+                                           [rm.X(variables[j]) for j in atom["controls"]]))
+    return graphs, re.sub(r"\x1b\[[0-9;]*m", "", composed.with_varnames(dict(zip(variables, model["fields"]))))

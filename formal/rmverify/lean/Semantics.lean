@@ -153,3 +153,81 @@ theorem invariant_always (m : Model State Action) (p : State → Prop)
   | succ n ih => rw [round]; exact .step ih
 
 end RMVerify
+
+namespace RMVerify.Reactive
+
+/-- A relational atom constrains only its controlled coordinates. Input ports
+    select either the old valuation (reads) or the candidate new one (awaits). -/
+structure Atom (State : Type) where
+  controls : List Nat
+  reads : List Nat
+  awaits : List Nat
+  initial : State → Prop
+  step : State → State → Prop
+
+structure Module (State : Type) where
+  atoms : List (Atom State)
+
+def Module.parallel (a b : Module State) : Module State := ⟨a.atoms ++ b.atoms⟩
+
+def Module.initial (m : Module State) (s : State) : Prop :=
+  ∀ a ∈ m.atoms, a.initial s
+
+def Module.step (m : Module State) (s t : State) : Prop :=
+  ∀ a ∈ m.atoms, a.step s t
+
+theorem initial_parallel (a b : Module State) (s : State) :
+    (a.parallel b).initial s ↔ a.initial s ∧ b.initial s := by
+  simp only [Module.initial, Module.parallel, List.mem_append]
+  constructor
+  · intro h; exact ⟨fun x hx => h x (.inl hx), fun x hx => h x (.inr hx)⟩
+  · rintro ⟨ha, hb⟩ x (hx | hx)
+    · exact ha x hx
+    · exact hb x hx
+
+theorem step_parallel (a b : Module State) (s t : State) :
+    (a.parallel b).step s t ↔ a.step s t ∧ b.step s t := by
+  simp only [Module.step, Module.parallel, List.mem_append]
+  constructor
+  · intro h; exact ⟨fun x hx => h x (.inl hx), fun x hx => h x (.inr hx)⟩
+  · rintro ⟨ha, hb⟩ x (hx | hx)
+    · exact ha x hx
+    · exact hb x hx
+
+def ordered (ready : List Nat) : List (Atom State) → Bool
+  | [] => true
+  | a :: rest => a.awaits.all ready.contains && ordered (ready ++ a.controls) rest
+
+/-- Closed composition: exactly one owner per coordinate and an acyclic
+    await order. Old-value reads need no ordering restriction. -/
+def Module.wellFormed (m : Module State) (variables : Nat) : Bool :=
+  let owned := m.atoms.flatMap Atom.controls
+  owned.length == variables && owned.eraseDups.length == variables &&
+  owned.all (fun v => v < variables) &&
+  m.atoms.all (fun a => a.reads.all (fun v => v < variables)) && ordered [] m.atoms
+
+inductive Reachable (m : Module State) : State → Prop where
+  | initial : m.initial s → Reachable m s
+  | step : Reachable m s → m.step s t → Reachable m t
+
+theorem invariant_of_induction (m : Module State) (p : State → Prop)
+    (initial : ∀ s, m.initial s → p s)
+    (preserved : ∀ s t, p s → m.step s t → p t) :
+    ∀ s, Reachable m s → p s := by
+  intro s h
+  induction h with
+  | initial h => exact initial _ h
+  | step _ h ih => exact preserved _ _ ih h
+
+theorem invariant_always (m : Module State) (p : State → Prop)
+    (safe : ∀ s, Reachable m s → p s) (states : Nat → State)
+    (start : m.initial (states 0))
+    (round : ∀ n, m.step (states n) (states (n+1))) :
+    ∀ n, p (states n) := by
+  intro n
+  apply safe
+  induction n with
+  | zero => exact .initial start
+  | succ n ih => exact .step ih (round n)
+
+end RMVerify.Reactive

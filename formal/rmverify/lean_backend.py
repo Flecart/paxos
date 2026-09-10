@@ -53,12 +53,14 @@ def actuals(kinds): return " ".join(f"a{i}" for i in range(len(kinds)))
 def inputs(kinds): return lean_list(encode(k, f"a{i}") for i,k in enumerate(kinds))
 
 
-def tactic(names):
+def tactic(names, *, contextual=True):
     # No program-dependent proof scripts: reduction, cases, arithmetic, and logic.
     # A useful split must survive when simp makes no further change. Otherwise
     # repeat' rolls back that split and leaves conditional goals for omega.
     simplify = "simp_all (config := {failIfUnchanged := false})"
-    return (f"{simplify} [{', '.join(names)}, {UNFOLD}]\n"
+    initial = simplify if contextual else "simp (config := {failIfUnchanged := false})"
+    location = "" if contextual else " at *"
+    return (f"{initial} [{', '.join(names)}, {UNFOLD}]{location}\n"
             f"all_goals (repeat' (first | omega | split <;> {simplify} [{UNFOLD}]))\n"
             "all_goals first | omega | grind [RMVerify.flag]")
 
@@ -107,20 +109,22 @@ def run(directory, name, source, audits, timeout, *, output=False):
     return "proved", ""
 
 
-def definitions(model):
+def graph_definitions(graph, i):
+    # Normalize the wire environment once, with a kernel-checked rfl lemma.
+    # ponytail: expansion can grow with DAG sharing; use staged evaluation if
+    # larger graphs exhaust compilation/proof resources.
+    wires = [("var", j) for j in range(len(graph["inputs"]))]
+    for term in graph["terms"]: wires.append(substitute(term, wires))
+    outputs = lean_list(f"({expr(wires[j])} : Expr).eval env" for j in graph["outputs"])
+    return [f"def graph{i} : Graph := ⟨{len(graph['inputs'])}, {lean_list(map(expr, graph['terms']))}, {lean_list(map(str, graph['outputs']))}⟩",
+            f"theorem graph_eval{i} (env : Env) : graph{i}.run env = {outputs} := by rfl"]
+
+
+def program_definitions(model):
     lines = ["import Semantics", "open RMVerify", "namespace Verified", "set_option linter.all false", "set_option maxRecDepth 100000", "set_option maxHeartbeats 1000000"]
     names = []
     for i,(program, graph) in enumerate(zip(model["programs"], model["graphs"])):
-        # Normalize the wire environment once, with a kernel-checked rfl lemma.
-        # Unfolding execute inside simp repeatedly visits all earlier wires.
-        # ponytail: expression expansion can grow with DAG sharing; retain let
-        # bindings and prove staged evaluation if larger graphs hit this ceiling.
-        wires = [("var", j) for j in range(len(graph["inputs"]))]
-        for term in graph["terms"]: wires.append(substitute(term, wires))
-        outputs = lean_list(f"({expr(wires[j])} : Expr).eval env" for j in graph["outputs"])
-        lines += [f"def source{i} : Stmt := {statement(program.body)}",
-                  f"def graph{i} : Graph := ⟨{len(graph['inputs'])}, {lean_list(map(expr, graph['terms']))}, {lean_list(map(str, graph['outputs']))}⟩",
-                  f"theorem graph_eval{i} (env : Env) : graph{i}.run env = {outputs} := by rfl"]
+        lines += [f"def source{i} : Stmt := {statement(program.body)}", *graph_definitions(graph, i)]
         names += [f"source{i}", f"graph_eval{i}"]
         typed = " ∧ ".join([f"(env {j} = 0 ∨ env {j} = 1)" for j,k in enumerate(program.inputs) if k == "bool"] + ["True"])
         lines += [f"theorem translation{i} (env : Env) (typed : {typed}) :",
@@ -129,6 +133,11 @@ def definitions(model):
                   # otherwise simp repeatedly evaluates the unbound suffix body.
                   f"    simp only [source{i}, Stmt.exec, Outcome.bind_next, Outcome.bind_returned, Outcome.bind_ite, Outcome.outputs_ite, Outcome.outputs_next, Outcome.outputs_returned]",
                   "    all_goals", indent(tactic([f"graph_eval{i}"]), "      "), f"#print axioms translation{i}"]
+    return lines, names
+
+
+def definitions(model):
+    lines, names = program_definitions(model)
     lines += ["structure State where"]
     for i,k in enumerate(model["fields"].values()): lines.append(f"  f{i} : {kind(k)}")
     lines += ["  deriving Repr, DecidableEq", "def encodeState (s : State) : List Int := " + lean_list(encode(k, f"s.f{i}") for i,k in enumerate(model["fields"].values())),

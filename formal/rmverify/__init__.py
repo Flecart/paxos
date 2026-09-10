@@ -1,3 +1,3 @@
-from .api import Call, Contract, Report, Specification, Trace, verify
+from .api import Await, Call, Component, Composition, Contract, Report, Specification, Trace, verify
 
-__all__ = ["Call", "Contract", "Report", "Specification", "Trace", "verify"]
+__all__ = ["Await", "Call", "Component", "Composition", "Contract", "Report", "Specification", "Trace", "verify"]

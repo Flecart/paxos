@@ -34,7 +34,7 @@ def annotation(value, target=None):
     raise Unsupported(f"unsupported or missing type annotation: {value!r}")
 
 
-def fields_of(target):
+def fields_of(target, *, require_init=True):
     if not inspect.isclass(target) or target.__bases__ != (object,) or type(target) is not type:
         raise Unsupported("target must be a plain class without inheritance/metaclass behavior")
     tree = ast.parse(textwrap.dedent(inspect.getsource(target))).body[0]
@@ -42,9 +42,9 @@ def fields_of(target):
         raise Unsupported("class decorators are unsupported")
     fields = dict(inspect.get_annotations(target))
     init = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
-    if init is None:
+    if init is None and require_init:
         raise Unsupported("an explicit zero-argument __init__ is required")
-    for n in ast.walk(init):
+    for n in ast.walk(init) if init is not None else ():
         if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Attribute):
             if isinstance(n.target.value, ast.Name) and n.target.value.id == "self":
                 kind = ast.unparse(n.annotation)
@@ -239,14 +239,32 @@ def parameters(function):
     return result
 
 
-def method_program(function, fields, *, initialize=False):
+def method_program(function, fields, *, initialize=False, initialize_arguments=None):
     params = parameters(function)
     if not params or params[0].name != "self": raise Unsupported("instance methods require self")
-    if initialize and len(params) != 1: raise Unsupported("constructor must take no arguments")
+    if initialize and initialize_arguments is None and len(params) != 1:
+        raise Unsupported("constructor must take no arguments")
     kinds = [(p.name, annotation(p.annotation)) for p in params[1:]]
     if any(k not in ("int", "bool") for _, k in kinds): raise Unsupported("method inputs must be int or bool")
     result = "none" if initialize else annotation(inspect.signature(function).return_annotation)
-    return Parser(function, fields, kinds, result, method=True, initialize=initialize).parse()
+    parser = Parser(function, fields, kinds, result, method=True, initialize=initialize)
+    if initialize_arguments is None:
+        return parser.parse()
+    if not initialize or set(initialize_arguments) != {name for name, _ in kinds}:
+        raise Unsupported("initializer argument names differ from constructor signature")
+    bindings = []
+    for name, kind in kinds:
+        value = initialize_arguments[name]
+        if type(value) is not (bool if kind == "bool" else int):
+            raise Unsupported("initializer argument type mismatch")
+        slot, _ = parser.bindings[name]
+        parser.assigned.add(slot)
+        bindings.append(("assign", slot, literal(value)))
+    program = parser.parse()
+    # Bind a finite constructor call before interpreting its unchanged body.
+    for binding in reversed(bindings):
+        program.body = ("seq", binding, program.body)
+    return program
 
 
 def predicate_program(function, fields, target, expected):

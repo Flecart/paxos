@@ -33,6 +33,34 @@ class Specification:
     strengthening: list = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class Await:
+    """Bind an input port to a variable's updated value in this round."""
+    variable: str
+
+
+@dataclass
+class Component:
+    """One RM atom: locally owned Python state and finite action alternatives."""
+    target: type
+    transitions: list
+    controls: dict[str, str]
+    inputs: dict = field(default_factory=dict)
+    initial_inputs: dict = field(default_factory=dict)
+    stutter: bool = True
+
+
+@dataclass
+class Composition:
+    """Closed parallel composition. target supplies the property state schema."""
+    target: type
+    components: list[Component]
+    invariants: list = field(default_factory=list)
+    strengthening: list = field(default_factory=list)
+    initial_relation: object = None
+    step_relation: object = None
+
+
 @dataclass
 class Report:
     status: str
@@ -50,5 +78,8 @@ class Report:
 
 
 def verify(spec, *, directory=None, timeout=60, depth=10):
+    if isinstance(spec, Composition):
+        from .composition import verify as run
+        return run(spec, directory=directory, timeout=timeout, depth=depth)
     from .checking import verify as run
     return run(spec, directory=directory, timeout=timeout, depth=depth)

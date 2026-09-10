@@ -1,5 +1,10 @@
 # Reactive Modules examples: Python → compiled RM → Lean
 
+**Peterson update:** the flattened example below records v1. Use the
+[v2 comparison](peterson-v2.md) and [generated evidence](peterson-v2.html) for
+separate native RM atoms, parallel composition, all initial flag valuations,
+and Lean proofs of correspondence with the specified paper relation.
+
 This report accompanies [the generated side-by-side comparison](fmsd99.html).
 The implementation is in [examples/paper.py](../examples/paper.py); all four
 examples use the existing `Specification` API and the same compiler. No

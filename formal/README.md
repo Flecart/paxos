@@ -15,6 +15,24 @@ Henzinger's *Reactive Modules*. Its [generated HTML companion](reports/fmsd99.ht
 shows actual Python, exported RM graphs, and generated Lean side by side,
 including complete proof logs and explicit initialization/modeling limitations.
 
+Peterson now has a [v2 implementation](examples/peterson_v2.py) with separate
+process classes, persistent native RM atoms, internal nondeterministic choices,
+and Lean proofs of their parallel composition. It also covers all four initial
+flag valuations. See the [v1/v2 comparison and trust boundaries](reports/peterson-v2.md)
+and [actual Python → native RM → Lean comparison](reports/peterson-v2.html).
+
+```sh
+formal/.venv/bin/python -m rmverify examples.peterson_v2:peterson --timeout 120
+formal/.venv/bin/python formal/test_composition.py -v
+formal/.venv/bin/python formal/composition_report.py
+```
+
+`Component` binds owned fields and input ports; `Composition` requests invariant
+proofs over their joint relation. Plain input bindings read old values;
+`Await("variable")` reads the current round's updated value. Conflicting owners,
+unbound inputs, and await cycles are rejected. The original single-class
+`Specification` API remains available.
+
 ```sh
 formal/.venv/bin/python formal/test_paper.py -v
 formal/.venv/bin/python formal/paper_report.py

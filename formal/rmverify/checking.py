@@ -140,9 +140,9 @@ def check_trace(model, trace):
     return dict(status="passed",observations=observations)
 
 
-def identity(spec, model):
-    source_paths = {Path(inspect.getsourcefile(spec.target))}
-    source_paths.update(Path(inspect.getsourcefile(p.function)) for p in model["programs"])
+def provenance(programs, targets):
+    source_paths = {Path(inspect.getsourcefile(target)) for target in targets}
+    source_paths.update(Path(inspect.getsourcefile(p.function)) for p in programs)
     files = {str(p.resolve()):hashlib.sha256(p.read_bytes()).hexdigest() for p in source_paths}
     package = Path(__file__).parent
     tools = {str(p.relative_to(package)):hashlib.sha256(p.read_bytes()).hexdigest() for p in package.rglob("*") if p.suffix in (".py",".lean") or p.name == "lean-toolchain"}
@@ -150,13 +150,20 @@ def identity(spec, model):
     upstream = Path(zrth.__file__).resolve().parent
     tools.update({"zrth/"+str(p.relative_to(upstream)):hashlib.sha256(p.read_bytes()).hexdigest() for p in upstream.rglob("*") if p.suffix in (".py",".so")})
     revision = subprocess.run(["git","-C",str(upstream),"rev-parse","HEAD"],text=True,capture_output=True)
-    def function_id(f):
-        return None if f is None else [f.__module__, f.__qualname__, hashlib.sha256(marshal.dumps(f.__code__)).hexdigest()]
+    return dict(sources=files, tooling=tools,
+                upstream_commit=revision.stdout.strip() if revision.returncode == 0 else None)
+
+
+def function_id(f):
+    return None if f is None else [f.__module__, f.__qualname__, hashlib.sha256(marshal.dumps(f.__code__)).hexdigest()]
+
+
+def identity(spec, model):
     specification = dict(target=[spec.target.__module__,spec.target.__qualname__],
                          initial=function_id(spec.target.__init__), transitions=[function_id(f) for f in spec.transitions],
                          invariants=[function_id(f) for f in spec.invariants], strengthening=[function_id(f) for f in spec.strengthening],
                          contracts=[[function_id(f),function_id(c.requires),function_id(c.ensures)] for f,c in spec.contracts.items()])
-    return dict(specification=specification,sources=files,tooling=tools,upstream_commit=revision.stdout.strip() if revision.returncode == 0 else None,
+    return dict(specification=specification, **provenance(model["programs"], [spec.target]),
                 target=spec.target.__qualname__,transitions=[m["name"] for m in model["methods"]],
                 properties=[p["identifier"] for p in model["invariants"]]+[c["identifier"] for c in model["contracts"]],
                 checks=[asdict(t) for t in spec.checks])
