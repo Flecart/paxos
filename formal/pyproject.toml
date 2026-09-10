@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rmverify"
+version = "0.1.0"
+description = "Check typed Python reactive programs and properties with Lean"
+requires-python = ">=3.12,<3.14"
+dependencies = ["zrth==0.1.0"]
+
+[project.scripts]
+rmverify = "rmverify.__main__:main"
+
+[tool.setuptools]
+include-package-data = false
+packages = ["rmverify", "examples"]
+py-modules = ["counter"]
+
+[tool.setuptools.package-data]
+rmverify = ["lean/*.lean", "lean/lean-toolchain"]

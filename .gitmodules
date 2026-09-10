@@ -1,0 +1,4 @@
+[submodule "formal/reactive-modules"]
+	path = formal/reactive-modules
+	url = https://github.com/Flecart/reactive-modules.git
+	branch = main

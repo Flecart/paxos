@@ -1,37 +1,30 @@
-"""Build the pinned upstream compiler in an isolated environment."""
-import json
+"""Build the Git submodule in an isolated Python environment."""
 import os
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parent
-REPO = ROOT / ".cache" / "reactive-modules"
+REPO = ROOT / "reactive-modules"
 PYTHON = ROOT / ".venv" / "bin" / "python"
 
 
-def run(*args, cwd=ROOT, env=None):
-    subprocess.run(args, cwd=cwd, env=env, check=True)
-
-
 def main():
-    config = json.loads((ROOT / "config.json").read_text())
-    if not (REPO / ".git").exists():
-        REPO.parent.mkdir(parents=True, exist_ok=True)
-        run("git", "clone", "https://github.com/Flecart/reactive-modules.git", str(REPO))
-    run("git", "checkout", "--detach", config["rm_commit"], cwd=REPO)
+    def run(*args, **kwargs):
+        subprocess.run(args, check=True, **kwargs)
+
+    if not (REPO / "python" / "Cargo.toml").exists():
+        raise SystemExit("Run git submodule update --init --recursive first")
     if not PYTHON.exists():
         run("uv", "venv", str(ROOT / ".venv"), "--python", "3.13")
     run("uv", "pip", "install", "--python", str(PYTHON), "torch==2.9.0",
         "--index-url", "https://download.pytorch.org/whl/cpu")
-    run("uv", "pip", "install", "--python", str(PYTHON), "-r", str(ROOT / "requirements.txt"))
-    env = dict(os.environ)
-    env.update(VIRTUAL_ENV=str(ROOT / ".venv"),
-               PATH=str(PYTHON.parent) + os.pathsep + env.get("PATH", ""),
+    run("uv", "pip", "install", "--python", str(PYTHON), "maturin==1.9.0")
+    env = dict(os.environ, VIRTUAL_ENV=str(ROOT / ".venv"),
+               PATH=str(PYTHON.parent) + os.pathsep + os.environ.get("PATH", ""),
                LIBTORCH_USE_PYTORCH="1", CARGO_BUILD_JOBS="2")
-    torch_lib = subprocess.check_output(
-        [str(PYTHON), "-c", "import torch,pathlib; print(pathlib.Path(torch.__file__).parent/'lib')"], text=True).strip()
-    env["LD_LIBRARY_PATH"] = torch_lib + os.pathsep + env.get("LD_LIBRARY_PATH", "")
-    run(str(PYTHON), "-m", "maturin", "develop", cwd=REPO / "python", env=env)
+    run(str(PYTHON), "-m", "maturin", "develop", "--locked", cwd=REPO / "python", env=env)
+    run("uv", "pip", "install", "--python", str(PYTHON), "--no-deps", "-e", str(ROOT))
+    run("lake", "--version", cwd=ROOT / "rmverify" / "lean")
 
 
 if __name__ == "__main__":

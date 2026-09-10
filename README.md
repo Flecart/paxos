@@ -1,8 +1,8 @@
 # Paxos playground
 
-For the bounded Python → reactive-modules → Lean model of the current learning
-implementation, see [formal/README.md](formal/README.md). It includes CSLib-based
-specifications, repeatable checks, and an explicit account of proof limitations.
+For the reusable Python → reactive-modules → Lean verification library, see
+[formal/README.md](formal/README.md). It checks source/translation correspondence,
+invariants, and method contracts; Paxos verification remains future work.
 
 Python 3.11+, standard library only. Networking and configuration are implemented;
 **Paxos is not**. Edit `paxos_lab/algorithm.py` to implement it yourself.
