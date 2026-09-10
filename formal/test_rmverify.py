@@ -79,6 +79,15 @@ class VerificationTests(unittest.TestCase):
                 self.assertNotEqual(report.translation,'proved')
                 self.assertTrue(all(p['status']!='proved' for p in report.properties.values()))
 
+    def test_corrupted_graph_normalization(self):
+        # The proof optimization is untrusted too: its rfl lemma must fail if
+        # it replaces a nonconstant graph by a constant normalized expression.
+        with patch.object(lean_backend, 'substitute', return_value=('lit', 0)):
+            report = self.verify(counter)
+        self.assertFalse(report.ok)
+        self.assertNotEqual(report.translation, 'proved')
+        self.assertTrue(all(p['status'] != 'proved' for p in report.properties.values()))
+
     def test_unsupported_syntax_and_input_types(self):
         self.assertEqual(Call("offer",method=4).arguments,{"method":4})
         template = '''class Example:

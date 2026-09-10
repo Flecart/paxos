@@ -5,6 +5,23 @@ abbrev Env := Nat → Int
 
 def flag (b : Bool) : Int := if b then 1 else 0
 
+@[simp] theorem flag_false : flag false = 0 := rfl
+@[simp] theorem flag_true : flag true = 1 := rfl
+
+-- Keep Boolean encodings symbolic instead of expanding a conditional for
+-- every nested Boolean operator during invariant simplification.
+@[simp] theorem flag_eq_zero (b : Bool) : flag b = 0 ↔ b = false := by
+  cases b <;> decide
+
+@[simp] theorem flag_eq_one (b : Bool) : flag b = 1 ↔ b = true := by
+  cases b <;> decide
+
+@[simp] theorem flag_eq_flag (a b : Bool) : flag a = flag b ↔ a = b := by
+  cases a <;> cases b <;> decide
+
+@[simp] theorem flag_test (b : Bool) : (flag b != 0) = b := by
+  cases b <;> rfl
+
 @[simp] theorem flag_valid (b : Bool) : flag b = 0 ∨ flag b = 1 := by
   cases b <;> decide
 

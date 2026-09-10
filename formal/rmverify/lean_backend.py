@@ -7,8 +7,10 @@ import signal
 import subprocess
 from textwrap import indent
 
+from .compiler import substitute
+
 SEMANTICS = Path(__file__).with_name("lean") / "Semantics.lean"
-UNFOLD = "RMVerify.Graph.run, RMVerify.execute, RMVerify.environment, RMVerify.update, RMVerify.Expr.eval, RMVerify.Op.eval, RMVerify.flag, RMVerify.Stmt.exec, List.range_succ"
+UNFOLD = "RMVerify.environment, RMVerify.update, RMVerify.Expr.eval, RMVerify.Op.eval, RMVerify.Stmt.exec, List.range_succ"
 
 
 def lean_list(values): return "[" + ", ".join(values) + "]"
@@ -52,10 +54,13 @@ def inputs(kinds): return lean_list(encode(k, f"a{i}") for i,k in enumerate(kind
 
 
 def tactic(names):
-    # No program-dependent proof scripts: reduction, Boolean cases, and Presburger arithmetic.
-    return (f"simp_all [{', '.join(names)}, {UNFOLD}]\n"
-            f"all_goals (repeat' (split <;> simp_all [{UNFOLD}]))\n"
-            "all_goals omega")
+    # No program-dependent proof scripts: reduction, cases, arithmetic, and logic.
+    # A useful split must survive when simp makes no further change. Otherwise
+    # repeat' rolls back that split and leaves conditional goals for omega.
+    simplify = "simp_all (config := {failIfUnchanged := false})"
+    return (f"{simplify} [{', '.join(names)}, {UNFOLD}]\n"
+            f"all_goals (repeat' (first | omega | split <;> {simplify} [{UNFOLD}]))\n"
+            "all_goals first | omega | grind [RMVerify.flag]")
 
 
 def prepare(directory):
@@ -92,7 +97,7 @@ def run(directory, name, source, audits, timeout, *, output=False):
     if code is None: return "unknown", f"{name}: Lean timed out"
     text = log.read_text()
     if code:
-        status = "unknown" if re.search(r"unsolved goals|could not prove|tactic.*failed|maximum|heartbeat", text) else "error"
+        status = "unknown" if re.search(r"unsolved goals|could not prove|tactic.*failed|`grind` failed|maximum|heartbeat", text) else "error"
         return status, f"{name}: Lean did not accept the obligation; see {log}"
     for theorem in audits:
         if f"'{theorem}' does not depend on any axioms" in text: continue
@@ -106,13 +111,24 @@ def definitions(model):
     lines = ["import Semantics", "open RMVerify", "namespace Verified", "set_option linter.all false", "set_option maxRecDepth 100000", "set_option maxHeartbeats 1000000"]
     names = []
     for i,(program, graph) in enumerate(zip(model["programs"], model["graphs"])):
+        # Normalize the wire environment once, with a kernel-checked rfl lemma.
+        # Unfolding execute inside simp repeatedly visits all earlier wires.
+        # ponytail: expression expansion can grow with DAG sharing; retain let
+        # bindings and prove staged evaluation if larger graphs hit this ceiling.
+        wires = [("var", j) for j in range(len(graph["inputs"]))]
+        for term in graph["terms"]: wires.append(substitute(term, wires))
+        outputs = lean_list(f"({expr(wires[j])} : Expr).eval env" for j in graph["outputs"])
         lines += [f"def source{i} : Stmt := {statement(program.body)}",
-                  f"def graph{i} : Graph := ⟨{len(graph['inputs'])}, {lean_list(map(expr, graph['terms']))}, {lean_list(map(str, graph['outputs']))}⟩"]
-        names += [f"source{i}", f"graph{i}"]
+                  f"def graph{i} : Graph := ⟨{len(graph['inputs'])}, {lean_list(map(expr, graph['terms']))}, {lean_list(map(str, graph['outputs']))}⟩",
+                  f"theorem graph_eval{i} (env : Env) : graph{i}.run env = {outputs} := by rfl"]
+        names += [f"source{i}", f"graph_eval{i}"]
         typed = " ∧ ".join([f"(env {j} = 0 ∨ env {j} = 1)" for j,k in enumerate(program.inputs) if k == "bool"] + ["True"])
         lines += [f"theorem translation{i} (env : Env) (typed : {typed}) :",
                   f"    (source{i}.exec env).outputs {program.fields} = graph{i}.run env := by",
-                  indent(tactic([f"source{i}", f"graph{i}"]), "    "), f"#print axioms translation{i}"]
+                  # Eliminate statement continuations before simplifying values;
+                  # otherwise simp repeatedly evaluates the unbound suffix body.
+                  f"    simp only [source{i}, Stmt.exec, Outcome.bind_next, Outcome.bind_returned, Outcome.bind_ite, Outcome.outputs_ite, Outcome.outputs_next, Outcome.outputs_returned]",
+                  "    all_goals", indent(tactic([f"graph_eval{i}"]), "      "), f"#print axioms translation{i}"]
     lines += ["structure State where"]
     for i,k in enumerate(model["fields"].values()): lines.append(f"  f{i} : {kind(k)}")
     lines += ["  deriving Repr, DecidableEq", "def encodeState (s : State) : List Int := " + lean_list(encode(k, f"s.f{i}") for i,k in enumerate(model["fields"].values())),

@@ -9,6 +9,18 @@ The examples include a counter, two-account transfer, Boolean register, and a
 renamed-field program. `paxos_lab/algorithm.py` is unchanged and is not verified;
 its containers, effects, and async behavior need future shared language support.
 
+The [paper comparison report](reports/fmsd99.md) adds NOT, AND, a set/reset latch,
+and the two-process mutual-exclusion protocol from Figures 1–2 of Alur and
+Henzinger's *Reactive Modules*. Its [generated HTML companion](reports/fmsd99.html)
+shows actual Python, exported RM graphs, and generated Lean side by side,
+including complete proof logs and explicit initialization/modeling limitations.
+
+```sh
+formal/.venv/bin/python formal/test_paper.py -v
+formal/.venv/bin/python formal/paper_report.py
+formal/.venv/bin/python -m rmverify examples.paper:peterson --timeout 120
+```
+
 ## Install and run
 
 Requirements: Git, uv, a Rust/C++ build toolchain, and elan. From the repository root:
@@ -144,7 +156,8 @@ models. Generic induction proves initialization and preservation of the
 conjunction of invariants. `always_safe` covers every instant of an infinite
 execution. `source_invariant` and `source_contract` explicitly lift the accepted
 claims to the structured source semantics. No program-specific proof script is
-maintained; automation uses shared reduction laws, case splitting, and `omega`.
+maintained; automation uses shared reduction laws, case splitting, `omega`, and
+`grind` for remaining logical obligations.
 
 The trust boundary is **source extraction, name/type binding, the specification
 of the supported Python semantics, and Lean's kernel/standard axioms**. Checking
