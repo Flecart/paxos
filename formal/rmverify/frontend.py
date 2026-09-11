@@ -24,6 +24,10 @@ class Program:
     result: str
     function: object
     initialize: bool = False
+    slot_names: list[str] = None
+    source_file: str = ""
+    source_line: int = 0
+    source_ast: str = ""
 
 
 def annotation(value, target=None):
@@ -54,8 +58,8 @@ def fields_of(target, *, require_init=True):
     if not fields:
         raise Unsupported("annotate state fields on the class or in __init__")
     result = {name: annotation(kind) for name, kind in fields.items()}
-    if any(name.startswith("__") for name in result):
-        raise Unsupported("special attribute names are unsupported")
+    if any(type(name) is not str or not name.isidentifier() or name.startswith("__") for name in result):
+        raise Unsupported("state fields require ordinary Python identifiers")
     if any(kind == "none" for kind in result.values()):
         raise Unsupported("state fields must be int or bool")
     for name, value in vars(target).items():
@@ -79,22 +83,24 @@ class Parser:
         self.line = inspect.getsourcelines(function)[1]
         self.tree = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
         self.slots, self.bindings, self.objects = [], {}, {}
+        self.slot_names = []
         self.method, self.initialize = method, initialize
         if method:
             self.objects["self"] = self.add_fields(fields)
         for name, kind in parameters:
             if kind == "state": self.objects[name] = self.add_fields(fields)
             elif kind == "none": self.bindings[name] = (None, "none")
-            else: self.bindings[name] = (self.add_slot(kind), kind)
+            else: self.bindings[name] = (self.add_slot(kind, name), kind)
         self.inputs = [] if initialize else list(self.slots)
         self.assigned = set() if initialize else set(range(len(self.slots)))
 
-    def add_slot(self, kind):
+    def add_slot(self, kind, name):
         self.slots.append(kind)
+        self.slot_names.append(name)
         return len(self.slots) - 1
 
     def add_fields(self, fields):
-        return {name: (self.add_slot(kind), kind) for name, kind in fields.items()}
+        return {name: (self.add_slot(kind, name), kind) for name, kind in fields.items()}
 
     def fail(self, node, message):
         raise Unsupported(f"{self.file}:{self.line + node.lineno - 1}:{node.col_offset + 1}: {message}")
@@ -185,7 +191,7 @@ class Parser:
                     self.fail(node, "assignment annotation mismatch")
                 if isinstance(target, ast.Name):
                     if target.id in self.objects: self.fail(node, "cannot rebind a state parameter")
-                    if target.id not in self.bindings: self.bindings[target.id] = (self.add_slot(kind), kind)
+                    if target.id not in self.bindings: self.bindings[target.id] = (self.add_slot(kind, target.id), kind)
                     slot, expected = self.bindings[target.id]
                 elif self.method and isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self" and target.attr in self.fields:
                     slot, expected = self.objects["self"][target.attr]
@@ -216,6 +222,10 @@ class Parser:
     def parse(self):
         if not isinstance(self.tree, ast.FunctionDef) or self.tree.decorator_list:
             self.fail(self.tree, "async/decorated functions are unsupported")
+        if (type(self.function.__name__) is not str or type(self.function.__qualname__) is not str or
+                self.function.__name__ != self.tree.name or
+                any(not part.isidentifier() and part != "<locals>" for part in self.function.__qualname__.split("."))):
+            self.fail(self.tree, "function metadata must use Python identifiers matching its source")
         compiled = compile(ast.Module(body=[self.tree], type_ignores=[]), self.file, "exec", dont_inherit=True)
         candidate = next(c for c in compiled.co_consts if isinstance(c, CodeType))
         actual = self.function.__code__
@@ -229,7 +239,8 @@ class Parser:
         if self.result != "none" and not returned: self.fail(self.tree, "all paths must return a value")
         if self.initialize and not set(range(len(self.fields))) <= assigned:
             self.fail(self.tree, "constructor must initialize every field")
-        return Program(self.function.__name__, body, self.inputs, self.slots, len(self.fields) if self.method else 0, self.result, self.function, self.initialize)
+        return Program(self.function.__name__, body, self.inputs, self.slots, len(self.fields) if self.method else 0, self.result, self.function, self.initialize, self.slot_names,
+                       self.file, self.line, ast.dump(self.tree, include_attributes=True))
 
 
 def parameters(function):

@@ -10,7 +10,7 @@ import unittest
 from examples.paper import EXAMPLES, control_locations, mutual_exclusion, priority
 from rmverify import verify
 from rmverify.checking import make_state, prepare_model, python_program
-from rmverify.compiler import run_graph
+from rmverify.execution import execute
 
 
 def allowed_rounds(name, state, inputs):
@@ -54,7 +54,7 @@ def check_relations():
                 for choices in product(boolean, repeat=selectors):
                     values = list(state + inputs + choices)
                     actual = python_program(model, 1, values)
-                    assert actual == run_graph(model["graphs"][1], values), (name, values)
+                    assert actual == execute(model["programs"][1], values), (name, values)
                     observed.add(tuple(actual[:-1]))
                     count += 1
                 assert observed == allowed_rounds(name, state, inputs), (name, state, inputs, observed)

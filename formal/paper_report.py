@@ -19,37 +19,6 @@ from test_paper import check_relations
 ROOT = Path(__file__).resolve().parent
 
 
-def expression(e):
-    match e:
-        case ["lit", n]: return str(n)
-        case ["bool", b]: return str(b).lower()
-        case ["var", n]: return f"v{n}"
-        case ["bin", op, a, b]: return f"{op}({expression(a)}, {expression(b)})"
-        case ["ite", c, a, b]: return f"ite({expression(c)}, {expression(a)}, {expression(b)})"
-    raise ValueError(f"unknown exported expression: {e}")
-
-
-def graph_listing(program, graph, function, spec, fields):
-    labels = []
-    if not program["initialize"]:
-        for parameter in inspect.signature(function).parameters.values():
-            if parameter.name == "self" or parameter.annotation is spec.target:
-                labels.extend(f"{parameter.name}.{field}" for field in fields)
-            elif parameter.annotation is not None:
-                labels.append(parameter.name)
-    assert len(labels) == len(graph["inputs"])
-    lines = [f"# {'initial' if program['initialize'] else 'update'} graph: {function.__qualname__}"]
-    for i, (kind, label) in enumerate(zip(graph["inputs"], labels, strict=True)):
-        lines.append(f"input v{i} : {kind}  # {label}")
-    for i, term in enumerate(graph["terms"], len(labels)):
-        lines.append(f"v{i} := {expression(term)}")
-    outputs = list(fields) if program["fields"] else []
-    outputs.append("result (None encoded as 0)" if program["result"] == "none" else "result")
-    for i, (wire, kind, label) in enumerate(zip(graph["outputs"], graph["sorts"], outputs, strict=True)):
-        lines.append(f"output[{i}] : {kind} := v{wire}  # {label}")
-    return "\n".join(lines)
-
-
 def code(text):
     return "<pre><code>" + escape(text) + "</code></pre>"
 
@@ -68,35 +37,37 @@ def render(runs, relations):
         for contract in spec.contracts.values():
             if contract.requires is not None: functions.append(contract.requires)
             functions.append(contract.ensures)
-        assert len(functions) == len(artifact["programs"]) == len(artifact["graphs"])
+        assert len(functions) == len(artifact["programs"])
         summary.append(f'<tr><td><a href="#{name}">{name}</a></td><td>{report.translation}</td>'
                        f'<td>{escape(str(report.properties))}</td><td>{relations[name]}</td></tr>')
         sections += [f'<section id="{name}"><h2>{name}</h2>',
-                     '<p>Field order: ' + escape(", ".join(f"f{i} = {field}" for i, field in enumerate(artifact["fields"]))) + '</p>',
+                     '<p>Field order: ' + escape(", ".join(f"{field}: {kind}" for field, kind in artifact["fields"].items())) + '</p>',
                      '<p>All rows below are generated from the current Python source and the accepted evidence. '
-                     'The RM column lists every exported wire without algebraic simplification. '
+                     'The RM column contains the generated typed Lean definitions. '
                      'The Lean column is an exact excerpt of Translation.lean, including the source tree used for correspondence.</p>']
-        for i, (program, graph, function) in enumerate(zip(artifact["programs"], artifact["graphs"], functions, strict=True)):
+        for i, (program, function) in enumerate(zip(artifact["programs"], functions, strict=True)):
             assert program["name"] == function.__name__
             start = translation.index(f"def source{i} :")
             end_marker = f"#print axioms translation{i}"
             end = translation.index(end_marker, start) + len(end_marker)
             sections += [f'<h3>{escape(function.__qualname__)}</h3>',
                          '<div class="columns"><table><thead><tr><th scope="col">Python</th>'
-                         '<th scope="col">Compiled RM ordered graph</th><th scope="col">Generated Lean</th>'
+                         '<th scope="col">Lean RM definitions</th><th scope="col">Checked theorem</th>'
                          '</tr></thead><tbody><tr><td>', code(textwrap.dedent(inspect.getsource(function))),
-                         '</td><td>', code(graph_listing(program, graph, function, spec, artifact["fields"])),
-                         '</td><td>', code(translation[start:end]), '</td></tr></tbody></table></div>']
+                         '</td><td>', code(translation[translation.index("structure ", start):translation.index(f"theorem translation{i}", start)]),
+                         '</td><td>', code(translation[translation.index(f"theorem translation{i}", start):end]), '</td></tr></tbody></table></div>']
         sections.append('<h3>Complete evidence</h3><p>Expand to inspect the complete model, properties, '
                         'proofs, kernel axiom audits, and provenance. No proof text is reconstructed by this renderer.</p>')
         files = [*sorted(directory.glob("*.lean")), *sorted(directory.glob("*.log")),
-                 directory / "artifact.json", directory / "report.json", directory / "lean-toolchain", directory / "lakefile.toml"]
+                 *sorted(directory.glob("*.json")), *sorted(directory.glob("*.toml")),
+                 directory / "lean-toolchain", directory / "recheck.py",
+                 *sorted((directory/"sources").glob("*.py"))]
         for file in files:
             sections += ['<details><summary>' + escape(file.name) + '</summary>', code(file.read_text()), '</details>']
         sections.append('</section>')
     html = '''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FMSD99 examples: Python → RM → Lean</title>
+<title>FMSD99 examples: Python → Lean RM definitions → checked theorem</title>
 <style>
 body{font:16px/1.5 system-ui,sans-serif;margin:2rem;color:#17212b;background:#fff}
 h1,h2,h3{line-height:1.2}a{color:#064ea3}section{border-top:2px solid #738294;margin-top:3rem}
@@ -107,15 +78,15 @@ details{margin:.7rem 0;border:1px solid #bac3cc;padding:.7rem}summary{cursor:poi
 details pre{margin-top:1rem;max-height:40rem;overflow:auto}p{max-width:95ch}
 @media print{body{margin:0}.columns table{min-width:0}pre{font-size:9px}details pre{max-height:none}}
 </style></head><body>
-<h1>FMSD99 examples: Python → RM → Lean</h1>
+<h1>FMSD99 examples: Python → Lean RM definitions → checked theorem</h1>
 <p>This is the generated companion to <a href="fmsd99.md">the full comparison report</a>.
 Source: <a href="https://www.cis.upenn.edu/~alur/FMSD99.pdf">Alur and Henzinger, Reactive Modules (1999), Figures 1–2</a>.</p>
 <p>These executable specializations use concrete constructor states and environment-supplied choices.
 They do not implement the paper's general composition, hiding, or temporal abstraction operators.
-The RM column is a readable serialization of the actual exported ordered graph, not the paper's guarded-command syntax.</p>
-<p>Lean checks the extracted source-to-graph equality and the properties of those models. Source extraction,
+The RM column contains typed executable Lean definitions generated from the supported Python source.</p>
+<p>Lean checks the extracted source-to-definition equality and the properties of those models. Source extraction,
 binding, and the mathematical interpretation of Python/RM operations remain trusted. These are not CPython proofs.
-The source interpreter and RM graph are separate inputs to Lean: the proof is not derived from RM alone.</p>
+Source syntax and executable Lean definitions are separate inputs to correspondence checking.</p>
 <p>All specifications have checks=[]. The finite relation checks below are additional regression evidence;
 the property proofs quantify over arbitrary inputs and unbounded executions. For gates and latch the meaningful
 theorem is source_contract; their empty conjunction of state invariants is trivially true.</p>
@@ -135,7 +106,7 @@ theorem is source_contract; their empty conjunction of state invariants is trivi
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=ROOT / ".rmverify" / "paper")
-    parser.add_argument("--html", type=Path, default=ROOT / "reports" / "fmsd99.html")
+    parser.add_argument("--html", type=Path, default=ROOT / "reports" / "fmsd99-direct.html")
     parser.add_argument("--timeout", type=float, default=120)
     args = parser.parse_args()
     relations = check_relations()

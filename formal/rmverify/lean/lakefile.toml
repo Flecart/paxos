@@ -1,0 +1,13 @@
+name = "rmverifyEvidence"
+defaultTargets = ["Semantics", "VeilAdapter"]
+
+[[require]]
+name = "veil"
+git = "https://github.com/verse-lab/veil.git"
+rev = "62757b8fa47362b869ee023ab8ebedb935cf88b7"
+
+[[lean_lib]]
+name = "Semantics"
+
+[[lean_lib]]
+name = "VeilAdapter"

@@ -1,96 +1,59 @@
-# rmverify: executable Python + properties → Lean evidence
+# rmverify: Python → Lean RM definitions → checked theorem
 
-`rmverify` is a reusable verifier for a deliberately small typed Python language.
-The library discovers state/input types, compiles to real reactive-module terms,
-and generates Lean proofs. Application authors supply code, predicates, and
-optional traces. There is no per-program compiler or handwritten Lean proof.
+`rmverify` checks a small typed Python fragment. Implementations remain ordinary
+Python; separate `Specification` and `Composition` objects select transitions,
+properties, strengthening, and component connections. The current direct pipeline
+supports the existing scalar examples. It does **not** verify
+`paxos_lab/algorithm.py`.
 
-The examples include a counter, two-account transfer, Boolean register, and a
-renamed-field program. `paxos_lab/algorithm.py` is unchanged and is not verified;
-its containers, effects, and async behavior need future shared language support.
-
-The [paper comparison report](reports/fmsd99.md) adds NOT, AND, a set/reset latch,
-and the two-process mutual-exclusion protocol from Figures 1–2 of Alur and
-Henzinger's *Reactive Modules*. Its [generated HTML companion](reports/fmsd99.html)
-shows actual Python, exported RM graphs, and generated Lean side by side,
-including complete proof logs and explicit initialization/modeling limitations.
-
-Peterson now has a [v2 implementation](examples/peterson_v2.py) with separate
-process classes, persistent native RM atoms, internal nondeterministic choices,
-and Lean proofs of their parallel composition. It also covers all four initial
-flag valuations. See the [v1/v2 comparison and trust boundaries](reports/peterson-v2.md)
-and [actual Python → native RM → Lean comparison](reports/peterson-v2.html).
-
-```sh
-formal/.venv/bin/python -m rmverify examples.peterson_v2:peterson --timeout 120
-formal/.venv/bin/python formal/test_composition.py -v
-formal/.venv/bin/python formal/composition_report.py
-```
-
-`Component` binds owned fields and input ports; `Composition` requests invariant
-proofs over their joint relation. Plain input bindings read old values;
-`Await("variable")` reads the current round's updated value. Conflicting owners,
-unbound inputs, and await cycles are rejected. The original single-class
-`Specification` API remains available.
-
-The intentional stuck-process mutation is preserved in
-[`examples/peterson_stuck.py`](examples/peterson_stuck.py). Its mutual-exclusion
-invariant still holds, but it omits a round allowed by the paper specification.
-Run it with `python -m rmverify examples.peterson_stuck:peterson --timeout 120`;
-v2 currently reports that equivalence as `unknown` because automatic
-counterexample search is not yet connected to composition verification.
-
-```sh
-formal/.venv/bin/python formal/test_paper.py -v
-formal/.venv/bin/python formal/paper_report.py
-formal/.venv/bin/python -m rmverify examples.paper:peterson --timeout 120
-```
+The old SSA/`zrth`/ordered-wire compiler and its Lean interpreter have been removed.
+The frontend validates a structured source tree. The backend emits typed Lean
+functions with native integer/Boolean operations, `do` blocks, mutable locals, named output
+records, and Python field names. Lean independently interprets the extracted
+source and proves agreement on state and return values. Generated definitions are
+untrusted until those correspondence proofs pass.
 
 ## Install and run
 
-Requirements: Git, uv, a Rust/C++ build toolchain, and elan. From the repository root:
+Requirements: Python 3.12–3.13, uv, Git, elan, and Node/npm (for Veil's upstream widget build). No Rust, Torch, Maturin, or
+initialization of `formal/reactive-modules` is required.
 
 ```sh
-git submodule update --init --recursive
 python3 formal/bootstrap.py
 formal/.venv/bin/python -m rmverify examples.counter_spec:spec
 formal/.venv/bin/python -m rmverify examples.programs:transfer
 formal/.venv/bin/python -m rmverify examples.programs:register
 formal/.venv/bin/python -m rmverify examples.programs:renamed
-formal/.venv/bin/python formal/test_rmverify.py -v
+formal/.venv/bin/python -m rmverify examples.peterson_v2:peterson --timeout 120
+formal/.venv/bin/python -m rmverify examples.peterson_stuck:peterson --timeout 120
 ```
 
-`python3 formal/verify.py` remains a shortcut for the counter. The executable
-counter itself runs with `python3 formal/counter.py -5 0 7 7 3 12`.
+Bootstrap installs the local Python package and builds the Lean library. Lean
+4.32.0, Veil, and all its transitive Lake dependencies are pinned in
+[`rmverify/lean/lake-manifest.json`](rmverify/lean/lake-manifest.json). The first
+build downloads those dependencies. The Python dependency is pinned Z3, used only
+to propose witnesses. The upstream RM submodule remains pinned for historical
+reference and comparison; it is not an installation or verification input.
 
-Bootstrap builds the pinned upstream `zrth` extension and installs the local
-`formal/` package into `formal/.venv`. Upstream currently requires CPU PyTorch
-and Python 3.12–3.13; bootstrap selects 3.13. Lean 4.30.0 is pinned and uses only
-`Std`: no mathlib, CSLib, external proof oracle, or verification-branch dependency.
-The package carries its shared Lean semantics, so the CLI also works outside this
-repository when run with the installed environment.
+`python3 formal/verify.py` remains the counter shortcut. The counter itself runs
+with `python3 formal/counter.py -5 0 7 7 3 12`.
 
-## User interface
+## Annotation policy
 
-The implementation remains ordinary Python:
-
-```python
-class Counter:
-    value: int
-
-    def __init__(self) -> None:
-        self.value = 0
-
-    def offer(self, offered: int) -> None:
-        if offered > self.value:
-            self.value = offered
-```
-
-Use inspectable definitions in `.py` files and put the specification in an
-importable Python module:
+| Information | Where it comes from |
+| --- | --- |
+| State, argument, and return types | Ordinary Python annotations |
+| Local types and source field access | Inferred during validated extraction |
+| Selected public transitions | Separate specification |
+| Component ownership and connections | `Component.controls` and `inputs` |
+| Old versus current-round inputs | String binding versus `Await(variable)` |
+| Correctness properties | Explicit Boolean predicates |
+| Strengthening | Optional predicates, proved together with the invariant |
+| Constructor choices | Explicit finite domains; Boolean parameters default to both values |
 
 ```python
-from rmverify import Specification, Contract, Call, Trace, verify
+from counter import Counter
+from rmverify import Specification, Contract, Call, Trace
 
 def nonnegative(state: Counter) -> bool:
     return state.value >= 0
@@ -101,141 +64,128 @@ def monotone(before: Counter, after: Counter,
 
 spec = Specification(
     target=Counter,
-    transitions=[Counter.offer],
+    transitions=[Counter.step],
     invariants=[nonnegative],
-    contracts={Counter.offer: Contract(ensures=monotone)},
-    checks=[Trace([Call("offer", offered=-5), Call("offer", offered=7)])],
+    contracts={Counter.step: Contract(ensures=monotone)},
+    checks=[Trace([Call("step", offered=-5), Call("step", offered=7)])],
 )
-
-# In application/test code:
-# report = verify(spec)
-# assert report.ok, report.diagnostics
 ```
 
-Use `python -m rmverify your_module:spec`. Constructor and selected method code
-are the verification inputs; there are no reserved state, argument, or method
-names. Annotate state fields on the class or on assignments in `__init__`.
+Use inspectable definitions in `.py` files. Invariants receive one state.
+Preconditions receive the old state and method arguments. Postconditions receive
+old state, new state, result, and method arguments. Preconditions qualify
+postconditions only: they do not remove calls from invariant reachability.
+`strengthening` predicates are proved, never assumed. The unstrengthened example
+remains `unknown` if induction fails without a reachable counterexample.
 
-- Invariants receive one state.
-- Contract `requires` predicates receive the before-state, then method arguments.
-- Contract `ensures` predicates receive before-state, after-state, result, then
-  method arguments. All predicates return `bool`. Bindings are positional; use
-  the target class annotation for state snapshots and the method's return type
-  for the result, including `None` for methods returning nothing.
-- Preconditions qualify postconditions only. They **never exclude method calls
-  from invariant reachability**. For example, the deliberately broken example's
-  positive-input contract is proved, while its unconditional invariant is refuted.
-- `strengthening=[predicate, ...]` supplies additional Python invariants. They
-  are proved together with the requested invariants, never assumed. The
-  `unstrengthened`/`strengthened` examples demonstrate `unknown` becoming `proved`.
-- Checks are concrete traces, with exactly named, correctly typed arguments.
-  They compare original Python state/results with mathematical RM execution and
-  evaluate predicates. They are regression evidence, not universal proofs.
+The scalar fragment supports `int`/`bool` fields, annotated synchronous methods,
+locals, assignment, branches, early return, `+`/`-`, literal multiplication,
+comparisons, Boolean operators, conditional expressions, and binary `min`/`max`.
+Integers are mathematical, unbounded integers. Conditions must be Boolean.
+Unsupported code, missing annotations, dynamic class behavior, and stale loaded
+functions are rejected. Field/parameter names are not reserved verification APIs.
 
-## Supported language and execution
+## RM and Veil semantics
 
-The first release supports plain classes with at least one `int`/`bool` field,
-a zero-argument constructor, and selected synchronous instance methods with
-explicit scalar argument and return annotations. Returns may be `int`, `bool`,
-or `None`. Fields and locals have separate binding namespaces; every field must
-be initialized and every read must be definitely assigned.
+Composed processes are independent atoms. Each may stutter independently, and
+several may advance simultaneously in one round. Plain input bindings read the
+old snapshot even if the producer advances; `Await` reads the candidate new
+snapshot. Duplicate owners, missing bindings, wrong types, and await cycles are
+frontend errors. Lean checks ownership/await ordering and atom read dependencies,
+source/definition agreement, nonempty initialization, and nonblocking rounds.
 
-Supported operations are assignments (including annotated and augmented forms),
-locals, branches, early returns, integer `+`/`-`, unary signs, multiplication by
-integer literals, comparisons, Boolean `and`/`or`/`not`, conditional expressions,
-and two-argument `min`/`max`. Predicates use the same language and cannot mutate
-state. Integers are unbounded. Large literals and coefficients are constructed
-with small scalar affine RM terms, without truncation or a repeated-doubling
-expression explosion. Boolean operands must actually be Boolean, not numeric
-truthiness or implicit Boolean/integer arithmetic.
+The two-component Peterson example covers all four initial flag valuations and
+proves equality with its separately specified round relation. The combined
+Peterson example in `examples/paper.py` is a **historical specialization** with
+external run selectors and one concrete constructor state.
 
-Loops, arbitrary calls, containers, async, exceptions, floats, division,
-nonlinear multiplication, inheritance, special object behavior, descriptors,
-behavior-changing decorators, dynamic attributes, and default/variadic arguments
-are rejected before compilation. Unsupported source reports a diagnostic rather
-than silently dropping behavior. Loaded functions must match their source; reload
-modules after editing code in an interactive process.
-
-An execution is construction followed by arbitrary calls to selected methods,
-with arbitrary correctly typed arguments. Each method call is atomic. Contracts
-are checked on reachable states, using established invariants when available.
-Outside mutation, unselected calls, resource exhaustion, and concurrent accesses
-are outside this execution model. Code requiring input restrictions must enforce
-them itself if an invariant needs those restrictions.
-
-## What Lean checks
-
-The shared frontend extracts a typed **structured source tree**, retaining
-sequencing, branching, and early returns. The compiler separately lowers it to
-SSA-like expressions, creates upstream RM terms, and exports the actual ordered
-RM atoms. Lean has an independent structured statement interpreter and an
-ordered-wire interpreter. Both use mathematical integers and Boolean 0/1 values.
-
-Every constructor, method, and predicate gets a translation theorem equating the
-two interpretations for all well-typed inputs. These theorems include state and
-return values. Graph corruption and predicate corruption are acceptance tests:
-a safe but incorrect compiled program cannot pass translation checking.
-
-The generated `source_model_eq` and predicate agreement theorems connect the two
-models. Generic induction proves initialization and preservation of the
-conjunction of invariants. `always_safe` covers every instant of an infinite
-execution. `source_invariant` and `source_contract` explicitly lift the accepted
-claims to the structured source semantics. No program-specific proof script is
-maintained; automation uses shared reduction laws, case splitting, `omega`, and
-`grind` for remaining logical obligations.
-
-The trust boundary is **source extraction, name/type binding, the specification
-of the supported Python semantics, and Lean's kernel/standard axioms**. Checking
-correspondence removes the compiler/exporter's correctness from the trust needed
-for these source-semantic claims. It does not prove the parser correct, formalize
-all CPython behavior, or establish equivalence with native Rust/PyTorch fixed-width
-execution. Hashes establish evidence identity, not semantic correctness. The
-original executable Python is differentially tested as additional evidence.
+Single-class reachability has a proved equivalence with a one-atom relational RM.
+Its invariant induction uses the same RM induction theorem as composition.
+[`VeilAdapter.lean`](rmverify/lean/VeilAdapter.lean) maps each **complete round**
+to Veil's transition interface and proves initial, round, and reachable-state
+correspondence. Generated invariant theorems also cover that Veil representation.
+`veil.smt.trust` is explicitly false. The current automation uses Lean reduction,
+standard-library lemmas, `omega`, and `grind`; witness proposals currently use Z3.
+Veil SMT reconstruction and Veil symbolic trace discovery are not connected yet.
+For small integer intervals suggested by property literals, automation may prove
+a bound from the induction hypothesis and enumerate those cases. A failed bound
+proof falls back to symbolic checking; guessed bounds never restrict executions.
 
 ## Results and evidence
 
-Each invocation creates a fresh evidence directory (default `.rmverify/check-*`)
-and prints a JSON report. Use `--out PATH`, `--timeout SECONDS` (default 60 per
-Lean check/SMT query), or `--depth N` (default 10 method calls for witness search).
-Proofs are unbounded; the depth only limits counterexample search. The Python API
-accepts the equivalent `directory`, `timeout`, and `depth` keyword arguments.
+```sh
+formal/.venv/bin/python -m rmverify module:spec --out .rmverify --timeout 120 --depth 10
+formal/.venv/bin/python formal/test_rmverify.py -v
+formal/.venv/bin/python formal/test_composition.py -v
+formal/.venv/bin/python formal/test_paper.py -v
+```
 
 | Status | Meaning |
 | --- | --- |
-| `proved` | Translation and exact proof obligations passed Lean and axiom auditing. |
-| `refuted` | Lean checked a reachable trace violating an invariant or contract. |
-| `unknown` | Proof checking/search failed or timed out, without a checked refutation. |
-| `unsupported` | The program/specification exceeds the accepted language. |
-| `error` | Tooling, translation, stale-source, or concrete-check failure. |
+| `proved` | Lean accepted correspondence and all claims with approved axiom dependencies. |
+| `refuted` | Lean replayed an invariant/contract violation or a relation mismatch. |
+| `unknown` | Proof/search did not establish either result, including timeouts. |
+| `unsupported` | The program/specification is outside the supported fragment. |
+| `error` | Tooling, correspondence, stale inputs, or concrete checks failed. |
 
-A failed inductive proof is not a counterexample: its problematic state may be
-unreachable. Add strengthening predicates when needed. Z3 only proposes traces;
-its `sat`/`unsat` responses never become proofs. Refutations require kernel replay.
-Only `propext`, `Classical.choice`, and `Quot.sound` are accepted axioms; admissions
-and native-evaluator proof shortcuts are rejected. `report.ok` and the CLI's zero
-exit status require all requested claims proved and all supplied checks passed.
+`report.ok` and the CLI's zero exit status require every requested claim proved.
+A failed inductive step is not a reachable counterexample. Composition witnesses
+use distinct `reachable_invariant` and `relation_mismatch` kinds. Relation
+equivalence ranges over all valuations, so a mismatch need not be reachable.
+`peterson_stuck` retains proved safety while receiving a checked missing-round
+counterexample. Search depth bounds discovery only; successful invariants cover
+unbounded executions.
 
-Evidence includes source/tool/upstream hashes, the structured source trees, typed
-RM graphs, generated Lean sources, proof logs, a report, and any counterexample
-traces. Input changes during checking invalidate the run. Earlier reports are
-historical evidence for their recorded hashes; rerun verification after edits.
+Evidence version **3** contains:
 
-## Updating upstream
+- `artifact.json`: source/specification identity, extracted source semantics,
+  field and atom metadata, dependency versions, and a content hash; no RM graph.
+- `sources/`: content-addressed copies of the actual Python source files.
+- `Translation.lean`: generated typed definitions and source correspondence.
+- `Semantics.lean`, `VeilAdapter.lean`, and pinned Lake files: reusable semantics
+  and the proved complete-round Veil adapter.
+- Property/witness `.lean` files and `.log` files, including final axiom audits.
+- `timings.json`, `report.json`, and `recheck.json`: timings, statuses, and exact
+  accepted obligations plus hashes for standalone replay.
 
-The submodule tracks `main`, currently pinned to
-`66bdb2d37d4c2fb925c103f8088b43653773d298`. Updates are explicit:
+To recheck accepted obligations without importing/running the Python verifier:
 
 ```sh
-git submodule update --remote --checkout formal/reactive-modules
-python3 formal/bootstrap.py
-formal/.venv/bin/python formal/test_rmverify.py -v
-git diff --submodule=log
-git add formal/reactive-modules
+python3 PATH_TO_EVIDENCE/recheck.py
 ```
 
-Review and commit the new pin only after the checks pass. The counter-specific
-compiler and handwritten proof runner have been replaced. Existing untracked
-`native-evidence/`, `protocol-evidence/`, and old ignored caches are not inputs.
-Future collections, helpers, and async support must extend shared semantics and
-translation checks once; Paxos must not acquire a separate verification-only
-implementation.
+Only Python's standard library and the pinned Lean dependencies are needed for
+replay. When moving evidence to another machine, discard `.lake` (a build cache
+which may contain a local dependency symlink); Lake reconstructs it from the
+included manifest. Replay checks hashes and axiom audits and does not upgrade
+unknown claims. Only `propext`, `Classical.choice`, and `Quot.sound` are accepted.
+A solver response, admission, timeout, or stale evidence cannot authorize `proved`.
+
+The trust boundary remains source extraction, name/type resolution, the specified
+semantics of the supported Python fragment, and Lean's kernel/standard axioms.
+Correspondence does not formalize the Python parser or all CPython execution.
+Differential probes are regression evidence. Outside mutation, unselected calls,
+resource exhaustion, and concurrent access are outside this atomic-call model.
+
+## Reports and remaining migration
+
+See the [measured comparison](reports/direct-pipeline.md) for proof-source sizes,
+wall times, methodology, and reproduction commands.
+
+The published `reports/fmsd99.*` and `reports/peterson-v2.*` files are historical
+graph-pipeline evidence for their recorded hashes. The report generators now emit
+`fmsd99-direct.html` and `peterson-direct.html` without replacing those records:
+
+```sh
+formal/.venv/bin/python formal/paper_report.py
+formal/.venv/bin/python formal/composition_report.py
+```
+
+This implementation establishes the direct **scalar** pipeline. The larger
+requested migration is not complete: flat dictionaries/sets, frozen records and
+optional messages, quantified collection predicates, iteration and typed helpers,
+borrow/transfer checking, explicit collection faults and no-fault obligations,
+`Choice(domain)`, ghost observers/projection proofs, and the registry and
+duplicate-safe network examples remain unsupported. They must extend the shared
+source semantics and checked correspondence before any such example is reported
+proved. No claim is made about Paxos verification.

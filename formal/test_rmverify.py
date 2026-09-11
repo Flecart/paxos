@@ -61,32 +61,36 @@ class VerificationTests(unittest.TestCase):
         self.assertLess(witness['calls'][-1]['arguments']['amount'],0)
         self.assertEqual(self.verify(broken_contract).status,"refuted")
 
-    def test_corrupted_compiler_and_predicate(self):
-        original = checking.compile_program
-        for predicate in (False,True):
-            def corrupt(program):
-                graph = original(program)
-                if not predicate and program.function is counter.transitions[0]:
-                    # Always-zero remains safe, but differs from the actual source.
-                    graph['outputs'][0] = graph['outputs'][-1]
-                elif predicate and program.function is counter.invariants[0]:
-                    graph['terms'].append(('bool',True))
-                    graph['outputs'][0] = len(graph['inputs'])+len(graph['terms'])-1
-                return graph
-            with self.subTest(predicate=predicate), patch.object(checking,'compile_program',corrupt):
+    def test_corrupted_generated_definitions(self):
+        original = lean_backend.compiled_definition
+        for function in (counter.target.__init__, counter.transitions[0], counter.invariants[0]):
+            def corrupt(program, i):
+                lines, names = original(program, i)
+                if program.function is function:
+                    # Safe but incorrect outputs must fail source correspondence.
+                    lines[-1] = "  [1]" if program.fields == 0 else "  [17, 0]"
+                return lines, names
+            with self.subTest(function=function), patch.object(lean_backend, 'compiled_definition', corrupt):
                 report = self.verify(counter)
-                self.assertEqual(report.status,'error',report)
-                self.assertNotEqual(report.translation,'proved')
-                self.assertTrue(all(p['status']!='proved' for p in report.properties.values()))
+                self.assertTrue((Path(report.evidence)/'Translation.lean').exists(), report)
+                self.assertNotEqual(report.translation, 'proved', report)
+                self.assertFalse(report.ok)
+                self.assertTrue(all(p['status'] != 'proved' for p in report.properties.values()))
 
-    def test_corrupted_graph_normalization(self):
-        # The proof optimization is untrusted too: its rfl lemma must fail if
-        # it replaces a nonconstant graph by a constant normalized expression.
-        with patch.object(lean_backend, 'substitute', return_value=('lit', 0)):
-            report = self.verify(counter)
-        self.assertFalse(report.ok)
-        self.assertNotEqual(report.translation, 'proved')
-        self.assertTrue(all(p['status'] != 'proved' for p in report.properties.values()))
+    def test_invalid_codegen_names_are_rejected(self):
+        function = counter.transitions[0]
+        original = function.__qualname__
+        try:
+            function.__qualname__ = "invalid»"
+            self.assertEqual(self.verify(counter).status, 'unsupported')
+        finally:
+            function.__qualname__ = original
+        annotations = counter.target.__annotations__
+        try:
+            counter.target.__annotations__ = {"invalid»": int}
+            self.assertEqual(self.verify(counter).status, 'unsupported')
+        finally:
+            counter.target.__annotations__ = annotations
 
     def test_unsupported_syntax_and_input_types(self):
         self.assertEqual(Call("offer",method=4).arguments,{"method":4})
@@ -154,6 +158,8 @@ def safe(s: Fresh) -> bool:
     def test_timeout_and_axiom_audit(self):
         timed = verify(counter,directory=self.root,timeout=0.001,depth=1)
         self.assertEqual(timed.status,'unknown',timed)
+        (self.root/'lake-manifest.json').write_text(json.dumps({'packages': []}))
+        (self.root/'lean-toolchain').write_text((lean_backend.SEMANTICS.parent/'lean-toolchain').read_text())
         with patch.object(subprocess,'Popen') as popen:
             process = popen.return_value
             process.returncode = 0
@@ -174,9 +180,19 @@ def safe(s: Fresh) -> bool:
         report = json.loads(result.stdout)
         artifact = json.loads((Path(report['evidence'])/'artifact.json').read_text())
         self.assertTrue(artifact['sources'])
-        revision = subprocess.check_output(['git','-C',str(Path(__file__).parent/'reactive-modules'),'rev-parse','HEAD'],text=True).strip()
-        self.assertEqual(artifact['upstream_commit'],revision)
+        self.assertEqual(artifact['version'], 3)
+        self.assertNotIn('graphs', artifact)
+        self.assertTrue(artifact['dependency_versions']['lean'])
         self.assertIn('source_model_eq',(Path(report['evidence'])/'Translation.lean').read_text())
+        replay = subprocess.run([sys.executable, str(Path(report['evidence'])/'recheck.py')],
+                                capture_output=True, text=True)
+        self.assertEqual(replay.returncode, 0, replay.stdout+replay.stderr)
+        source_path = Path(report['evidence'])/'Translation.lean'
+        source_path.write_text(source_path.read_text()+'\n-- changed\n')
+        replay = subprocess.run([sys.executable, str(Path(report['evidence'])/'recheck.py')],
+                                capture_output=True, text=True)
+        self.assertNotEqual(replay.returncode, 0)
+        self.assertIn('evidence content changed', replay.stderr)
 
 
 if __name__ == '__main__':

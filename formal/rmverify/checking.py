@@ -11,7 +11,7 @@ import tempfile
 
 from .api import Report
 from .frontend import Unsupported, annotation, fields_of, method_program, parameters, predicate_program
-from .compiler import compile_program, run_graph
+from .execution import execute
 from . import lean_backend as lean
 
 
@@ -23,7 +23,7 @@ def prepare_model(spec):
         if not inspect.isfunction(f) or f.__name__ == "__init__" or getattr(spec.target, f.__name__, None) is not f:
             raise Unsupported("transitions must be methods of the target class")
     if set(spec.contracts) - set(spec.transitions): raise Unsupported("contract for an unselected transition")
-    model = dict(target=spec.target, fields=fields, programs=[], graphs=[], methods=[], invariants=[], contracts=[])
+    model = dict(target=spec.target, fields=fields, programs=[], methods=[], invariants=[], contracts=[])
 
     def add(program):
         model["programs"].append(program)
@@ -49,7 +49,6 @@ def prepare_model(spec):
         model["contracts"].append(dict(method=j, requires=pre, ensures=post, identifier="contract:"+f.__qualname__))
     if not model["invariants"] and not model["contracts"]:
         raise Unsupported("specify at least one invariant or method contract")
-    model["graphs"] = [compile_program(p) for p in model["programs"]]
     return model
 
 
@@ -99,7 +98,7 @@ def differential(model):
         # Fixed deterministic probes; formal equivalence covers all other inputs.
         cases = [[False,True] if k == "bool" else [-10**100,-1,0,1,10**100] for k in p.inputs]
         for values in itertools.islice(itertools.product(*cases),128):
-            actual, expected = run_graph(model["graphs"][i],values), python_program(model,i,values)
+            actual, expected = execute(model["programs"][i],values), python_program(model,i,values)
             if actual != expected: raise ValueError(f"translation mismatch in {p.name}: {values}: Python={expected}, RM={actual}")
             count += 1
     return count
@@ -107,7 +106,7 @@ def differential(model):
 
 def check_trace(model, trace):
     obj = model["target"]()
-    state = run_graph(model["graphs"][0],[])[:len(model["fields"])]
+    state = execute(model["programs"][0],[])[:len(model["fields"])]
     def invariants():
         for p in model["invariants"]:
             if not p["function"](obj): raise ValueError(f"trace violates {p['identifier']}")
@@ -126,7 +125,7 @@ def check_trace(model, trace):
         result = m["function"](obj,*args)
         if type(result) is not {"int":int,"bool":bool,"none":type(None)}[m["result"]]:
             raise ValueError("runtime return type mismatch")
-        outputs = run_graph(model["graphs"][m["index"]],state+args)
+        outputs = execute(model["programs"][m["index"]],state+args)
         if snapshot(model,obj) != outputs[:-1] or (0 if result is None else result) != outputs[-1]:
             raise ValueError("Python/RM trace mismatch")
         state = outputs[:-1]
@@ -145,13 +144,14 @@ def provenance(programs, targets):
     source_paths.update(Path(inspect.getsourcefile(p.function)) for p in programs)
     files = {str(p.resolve()):hashlib.sha256(p.read_bytes()).hexdigest() for p in source_paths}
     package = Path(__file__).parent
-    tools = {str(p.relative_to(package)):hashlib.sha256(p.read_bytes()).hexdigest() for p in package.rglob("*") if p.suffix in (".py",".lean") or p.name == "lean-toolchain"}
-    import zrth
-    upstream = Path(zrth.__file__).resolve().parent
-    tools.update({"zrth/"+str(p.relative_to(upstream)):hashlib.sha256(p.read_bytes()).hexdigest() for p in upstream.rglob("*") if p.suffix in (".py",".so")})
-    revision = subprocess.run(["git","-C",str(upstream),"rev-parse","HEAD"],text=True,capture_output=True)
+    paths = [*package.glob("*.py"), *package.glob("lean/*.lean"), *package.glob("lean/*.toml"),
+             *package.glob("lean/*.json"), package/"lean/lean-toolchain"]
+    tools = {str(p.relative_to(package)):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    import platform
+    from importlib.metadata import version
     return dict(sources=files, tooling=tools,
-                upstream_commit=revision.stdout.strip() if revision.returncode == 0 else None)
+                dependency_versions={"lean": (package/"lean/lean-toolchain").read_text().strip(),
+                                     "python": platform.python_version(), "z3-solver": version("z3-solver")})
 
 
 def function_id(f):
@@ -180,7 +180,7 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
     try:
         model = prepare_model(spec)
         provenance = identity(spec,model)
-        artifact = dict(**provenance,fields=model["fields"],programs=[dict(name=p.name,body=p.body,inputs=p.inputs,slots=p.slots,fields=p.fields,result=p.result,initialize=p.initialize) for p in model["programs"]],graphs=model["graphs"],
+        artifact = dict(**provenance,version=3,pipeline="Python → Lean RM definitions → checked theorem",fields=model["fields"],programs=[{k:v for k,v in vars(p).items() if k != "function"} for p in model["programs"]],
                         invariants=[{k:v for k,v in p.items() if k != "function"} for p in model["invariants"]],contracts=model["contracts"])
         artifact["sha256"] = hashlib.sha256(json.dumps(artifact,sort_keys=True).encode()).hexdigest()
         (evidence/"artifact.json").write_text(json.dumps(artifact,indent=2)+"\n")
@@ -197,11 +197,11 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
                 report.status = report.translation = "error"
                 report.diagnostics.append(str(error))
         else:
-            report.diagnostics.append(f"{differential(model)} Python/RM differential probes passed (regression evidence only)")
+            report.diagnostics.append(f"{differential(model)} Python/source differential probes passed (regression evidence only)")
             for trace in spec.checks:
                 try: report.checks.append(check_trace(model,trace))
                 except (ValueError,TypeError,AssertionError) as error: report.checks.append(dict(status="failed",reason=str(error)))
-            inv_status, reason = lean.run(evidence,"Invariants",lean.invariant_proof(model,names),["invariant","always_safe","source_invariant"],timeout,output=True)
+            inv_status, reason = lean.run(evidence,"Invariants",lean.invariant_proof(model,names),["invariant","always_safe","source_invariant","veil_invariant"],timeout,output=True)
             for p in model["invariants"]: report.properties[p["identifier"]] = dict(status=inv_status)
             if reason: report.diagnostics.append(reason)
             for i,c in enumerate(model["contracts"]):
@@ -236,4 +236,11 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
         report.status = "error"
         report.diagnostics.append(f"{type(error).__name__}: {error}")
     status_path.write_text(json.dumps(asdict(report),indent=2)+"\n")
+    if 'provenance' in locals() and (evidence/"recheck.py").exists():
+        try: lean.seal(evidence, provenance["sources"], timeout)
+        except (RuntimeError, OSError) as error:
+            report.status = report.translation = "error"
+            for property_ in report.properties.values(): property_["status"] = "unknown"
+            report.diagnostics.append(str(error))
+            status_path.write_text(json.dumps(asdict(report),indent=2)+"\n")
     return report

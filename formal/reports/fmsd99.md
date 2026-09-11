@@ -1,3 +1,5 @@
+> Historical graph-pipeline evidence: retained for its recorded source and tool hashes. See formal/README.md for the current direct Lean pipeline.
+
 # Reactive Modules examples: Python → compiled RM → Lean
 
 **Peterson update:** the flattened example below records v1. Use the

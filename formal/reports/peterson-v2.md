@@ -1,3 +1,5 @@
+> Historical graph-pipeline evidence: retained for its recorded source and tool hashes. See formal/README.md for the current direct Lean pipeline.
+
 # Peterson v2: structural RM composition
 
 The [v2 Python example](../examples/peterson_v2.py) has two independent process

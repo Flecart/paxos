@@ -1,15 +1,11 @@
-"""Finite relational RM composition over independently compiled Python atoms.
-
-The native library supplies checked deterministic action graphs. This layer
-retains ownership, read/await ports, finite alternatives, and atom boundaries;
-it never compiles a scheduler or flattens processes into a Python tick method.
-"""
+"""Direct Lean RM composition with independent atoms and complete round semantics."""
 from dataclasses import asdict
 from graphlib import TopologicalSorter, CycleError
 from itertools import product
 import hashlib
 import inspect
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -17,17 +13,18 @@ from textwrap import indent
 
 from .api import Await, Report
 from .checking import function_id, provenance
-from .compiler import compile_composition, compile_program, run_graph
+from .execution import execute
 from .frontend import (Unsupported, annotation, fields_of, method_program,
                        parameters, predicate_program)
 from . import lean_backend as lean
+from .lean_backend import state_cases
 
 
 def prepare_model(spec):
     fields = fields_of(spec.target, require_init=False)
     if not spec.components or not spec.invariants:
         raise Unsupported("composition needs components and at least one invariant")
-    model = dict(fields=fields, programs=[], graphs=[], atoms=[], invariants=[], relations=[])
+    model = dict(fields=fields, programs=[], atoms=[], invariants=[], relations=[])
     names = list(fields)
     owners = {}
     for i, component in enumerate(spec.components):
@@ -128,8 +125,6 @@ def prepare_model(spec):
         if function is not None:
             model["relations"].append(dict(name=name, identifier="relation:"+function.__qualname__,
                 index=add(predicate_program(function, fields, spec.target, kinds))))
-    model["graphs"] = [compile_program(p) for p in model["programs"]]
-    model["native_graphs"], model["native_module"] = compile_composition(model)
     return model
 
 
@@ -149,9 +144,6 @@ def identity(spec, model):
 
 def definitions(model):
     lines, names = lean.program_definitions(model)
-    for i, graph in enumerate(model["native_graphs"]):
-        lines += lean.graph_definitions(graph, f"n{i}")
-        names.append(f"graph_evaln{i}")
     lines += ["open RMVerify.Reactive", "structure State where"]
     kinds = list(model["fields"].values())
     for i, k in enumerate(kinds):
@@ -176,16 +168,12 @@ def definitions(model):
         for source in (False, True):
             def output(index):
                 env = f"(environment {expressions[index]})"
-                run = f"(source{index}.exec {env}).outputs {len(ctrl)}" if source else f"graph{index}.run {env}"
+                run = f"(source{index}.exec {env}).outputs {len(ctrl)}" if source else f"compiled{index} {env}"
                 return f"({run}).take {len(ctrl)}"
             prefix = "sourceAtom" if source else "atom"
             initial = " ∨ ".join(f"({before} = {output(a['index'])})" for a in atom["initial"])
             alternatives = ([f"({after} = {before})"] if atom["stutter"] else [])
             alternatives += [f"({after} = {output(a['index'])})" for a in atom["actions"]]
-            if not source:
-                initial = " ∨ ".join(f"({before} = graphn{j}.run (environment []))" for j in atom["native_initial"])
-                values = lean.lean_list(lean.encode(kinds[p["variable"]], f"{'t' if p['awaited'] else 's'}.f{p['variable']}") for p in atom["native_inputs"])
-                alternatives = [f"({after} = graphn{j}.run (environment {values}))" for j in atom["native_update"]]
             lines += [f"def {prefix}{i} : Atom State where",
                       f"  controls := {lean.lean_list(map(str, ctrl))}",
                       f"  reads := {lean.lean_list(map(str, atom['reads']))}",
@@ -195,7 +183,7 @@ def definitions(model):
         for index, values in expressions.items():
             env = f"(environment {values})"
             binders = " ".join(f"({v} : State)" for v in ("s", "t") if f"{v}." in values)
-            lines += [f"  have agree{index} {binders} : (source{index}.exec {env}).outputs {len(ctrl)} = graph{index}.run {env} := by",
+            lines += [f"  have agree{index} {binders} : (source{index}.exec {env}).outputs {len(ctrl)} = compiled{index} {env} := by",
                       f"    exact translation{index} _ (by simp [environment])"]
         lines += [f"  unfold sourceAtom{i} atom{i}", "  rw [Atom.mk.injEq]",
                   "  refine ⟨rfl, rfl, rfl, ?_, ?_⟩",
@@ -205,6 +193,11 @@ def definitions(model):
                   "  · funext s t; apply propext",
                   "    simp only [" + ", ".join(f"agree{j}" for j in expressions) + "]",
                   "    all_goals", indent(lean.tactic(names), "      "), f"#print axioms atom_agreement{i}"]
+        lines += [f"theorem atom_respects{i} : atom{i}.Respects (fun s => environment (encodeState s)) := by",
+                  "  constructor",
+                  "  · intro s t h", indent(lean.tactic(names+[f"atom{i}", "Atom.Respects", "AgreeOn"]), "    "),
+                  "  · intro s s' t t' h₁ h₂", indent(lean.tactic(names+[f"atom{i}", "Atom.Respects", "AgreeOn"]), "    "),
+                  f"#print axioms atom_respects{i}"]
         names.append(f"atom{i}")
     for source in (False, True):
         prefix = "sourceAtom" if source else "atom"
@@ -224,7 +217,7 @@ def definitions(model):
               "#print axioms source_module_eq", "#print axioms composition_correspondence", "#print axioms well_formed"]
     for i, prop in enumerate(model["invariants"]):
         j = prop["index"]
-        lines += [f"def inv{i} (s : State) : Prop := environment (graph{j}.run (environment (encodeState s))) 0 ≠ 0",
+        lines += [f"def inv{i} (s : State) : Prop := environment (compiled{j} (environment (encodeState s))) 0 ≠ 0",
                   f"def sourceInv{i} (s : State) : Prop := environment ((source{j}.exec (environment (encodeState s))).outputs 0) 0 ≠ 0",
                   f"theorem inv_agreement{i} (s : State) : sourceInv{i} s ↔ inv{i} s := by",
                   f"  unfold sourceInv{i} inv{i}; rw [translation{j} _ (by simp [environment, encodeState])]",
@@ -238,22 +231,26 @@ def definitions(model):
         args = "(s : State)" if relation["name"] == "initial" else "(s t : State)"
         values = "encodeState s" if relation["name"] == "initial" else "encodeState s ++ encodeState t"
         j, name = relation["index"], relation["name"]
-        lines += [f"def specified_{name} {args} : Prop := environment (graph{j}.run (environment ({values}))) 0 ≠ 0",
+        lines += [f"def specified_{name} {args} : Prop := environment (compiled{j} (environment ({values}))) 0 ≠ 0",
                   f"def source_specified_{name} {args} : Prop := environment ((source{j}.exec (environment ({values}))).outputs 0) 0 ≠ 0",
                   f"theorem specified_{name}_agreement {args} : source_specified_{name} s {'t' if name == 'step' else ''} ↔ specified_{name} s {'t' if name == 'step' else ''} := by",
                   f"  unfold source_specified_{name} specified_{name}; rw [translation{j} _ (by simp [environment, encodeState])]",
                   f"#print axioms specified_{name}_agreement"]
         names.append(f"specified_{name}")
-    # Witnesses use the exported native graphs in await order. These obligations
-    # rule out vacuous safety from an empty initial set or a blocking relation.
+    # Construct one complete round in await order; stuttering is per atom.
     initial_values, next_values = {}, {}
     witness_names = []
     for i, atom in enumerate(model["atoms"]):
-        initial_graph = atom["native_initial"][0]
-        lines.append(f"def initialOutput{i} : List Int := graphn{initial_graph}.run (environment [])")
-        values = [lean.encode(kinds[p["variable"]], next_values[p["variable"]] if p["awaited"] else f"s.f{p['variable']}") for p in atom["native_inputs"]]
-        next_graph = atom["native_update"][0]
-        lines.append(f"def nextOutput{i} (s : State) : List Int := graphn{next_graph}.run (environment {lean.lean_list(values)})")
+        initial = atom["initial"][0]["index"]
+        lines.append(f"def initialOutput{i} : List Int := (compiled{initial} (environment [])).take {len(atom['controls'])}")
+        values = [lean.encode(kinds[j], f"s.f{j}") for j in atom["controls"]]
+        if atom["stutter"]:
+            output = lean.lean_list(values)
+        else:
+            action = atom["actions"][0]
+            values += [lean.encode(kinds[p["variable"]], next_values[p["variable"]] if p["awaited"] else f"s.f{p['variable']}") for p in action["ports"]]
+            output = f"(compiled{action['index']} (environment {lean.lean_list(values)})).take {len(atom['controls'])}"
+        lines.append(f"def nextOutput{i} (s : State) : List Int := {output}")
         for j, slot in enumerate(atom["controls"]):
             initial_values[slot] = lean.decode(kinds[slot], f"environment initialOutput{i} {j}")
             next_values[slot] = lean.decode(kinds[slot], f"environment (nextOutput{i} s) {j}")
@@ -266,13 +263,16 @@ def definitions(model):
               "  refine ⟨nextWitness s, ?_⟩", indent(lean.tactic(names+witness_names+["nextWitness"]), "  "),
               "#print axioms initial_nonempty", "#print axioms nonblocking"]
     lines.append("end Verified")
-    return "\n".join(lines)+"\n", names
+    source = "\n".join(lines)+"\n"
+    for i, name in reversed(list(enumerate(model["fields"]))):
+        source = re.sub(rf"\bf{i}\b", "«" + name + "»", source)
+    return source, names
 
 
 def invariant_proof(model, names):
     # Normalize hypotheses independently first. Contextual simplification of
     # the relational equalities can discard arithmetic premises needed later.
-    lines = ["import Translation", "open RMVerify RMVerify.Reactive Verified",
+    lines = ["import Translation", "set_option veil.smt.trust false", "set_option linter.all false", "open RMVerify RMVerify.Reactive Verified",
              "set_option linter.all false", "set_option maxRecDepth 100000", "set_option maxHeartbeats 2000000",
              "theorem invariant : ∀ s, Reactive.Reachable composed s → safe s := by",
              "  apply Reactive.invariant_of_induction",
@@ -283,23 +283,18 @@ def invariant_proof(model, names):
              "  Reactive.invariant_always composed safe invariant states start round",
              "theorem source_invariant : ∀ s, Reactive.Reachable sourceModule s → sourceSafe s := by",
              "  simpa only [source_module_eq, sourceSafe, safe, " + ", ".join(f"inv_agreement{i}" for i in range(len(model["invariants"]))) + "] using invariant",
+             "theorem veil_invariant : ∀ s, composed.toVeil.reachable () s → safe s := by",
+             "  intro s h; exact invariant s ((Reactive.veil_reachable composed s).mp h)",
+             "#print axioms veil_invariant",
              "#print axioms invariant", "#print axioms always_safe", "#print axioms source_invariant"]
     return "\n".join(lines)+"\n"
 
-
-def state_cases(model, variables):
-    kinds = list(model["fields"].values())
-    lines = [f"rcases {v} with ⟨" + ", ".join(f"{v}{i}" for i in range(len(kinds))) + "⟩" for v in variables]
-    cases = [f"cases {v}{i}" for v in variables for i,k in enumerate(kinds) if k == "bool"]
-    if cases:
-        lines.append(" <;> ".join(cases))
-    return "\n".join(lines)
 
 
 def relation_proof(relation, names):
     name = relation["name"]
     binders, args = ("(s : State)", "s") if name == "initial" else ("(s t : State)", "s t")
-    return "\n".join(["import Translation", "open RMVerify RMVerify.Reactive Verified",
+    return "\n".join(["import Translation", "set_option veil.smt.trust false", "set_option linter.all false", "open RMVerify RMVerify.Reactive Verified",
         "set_option linter.all false", "set_option maxRecDepth 100000", "set_option maxHeartbeats 2000000",
         f"theorem relation {binders} : composed.{name} {args} ↔ specified_{name} {args} := by",
         "  cases s" + ("; cases t" if name == "step" else ""), indent(lean.tactic(names), "  "),
@@ -318,7 +313,7 @@ def differential(spec, model):
         for init in atom["initial"]:
             obj = component.target(*init["arguments"].values())
             actual = [getattr(obj, name) for name in local] + [0]
-            if actual != run_graph(model["graphs"][init["index"]], []):
+            if actual != execute(model["programs"][init["index"]], []):
                 raise ValueError("constructor translation mismatch")
             count += 1
         for action in atom["actions"]:
@@ -331,36 +326,69 @@ def differential(spec, model):
                     setattr(obj, name, value)
                 result = p.function(obj, *values[len(local):])
                 actual = [getattr(obj, name) for name in local] + [0]
-                if result is not None or actual != run_graph(model["graphs"][action["index"]], list(values)):
+                if result is not None or actual != execute(model["programs"][action["index"]], list(values)):
                     raise ValueError("component translation mismatch")
                 count += 1
     return count
 
 
 def initial_states(model):
-    """All initial valuations of the exported native RM (small finite models)."""
+    """All finite constructor alternatives."""
     states = {tuple(0 for _ in model["fields"])}
     for atom in model["atoms"]:
         states = {tuple(dict(zip(atom["controls"], values)).get(i, old[i]) for i in range(len(old)))
-                  for old in states for j in atom["native_initial"]
-                  for values in [run_graph(model["native_graphs"][j], [])]}
+                  for old in states for a in atom["initial"]
+                  for values in [execute(model["programs"][a["index"]], [])[:-1]]}
     return states
 
 
 def successors(model, state):
-    """Execute one relational round, retaining old reads across all subrounds."""
+    """Execute a complete round, retaining old reads across all subrounds."""
     if len(state) != len(model["fields"]):
         raise ValueError("state arity mismatch")
     candidates = {tuple(state)}
     for atom in model["atoms"]:
         updated = set()
         for candidate in candidates:
-            values = [(candidate if p["awaited"] else state)[p["variable"]] for p in atom["native_inputs"]]
-            for j in atom["native_update"]:
-                writes = dict(zip(atom["controls"], run_graph(model["native_graphs"][j], values), strict=True))
+            if atom["stutter"]:
+                updated.add(candidate)
+            for action in atom["actions"]:
+                values = [state[j] for j in atom["controls"]]
+                values += [(candidate if p["awaited"] else state)[p["variable"]] for p in action["ports"]]
+                writes = dict(zip(atom["controls"], execute(model["programs"][action["index"]], values)[:-1], strict=True))
                 updated.add(tuple(writes.get(i, value) for i,value in enumerate(candidate)))
         candidates = updated
     return candidates
+
+
+def witness_proof(witness, names):
+    lines = ["import Translation", "set_option veil.smt.trust false", "set_option linter.all false", "open RMVerify RMVerify.Reactive Verified",
+             "set_option maxRecDepth 100000", "set_option maxHeartbeats 2000000"]
+    for i, state in enumerate(witness["states"]):
+        lines.append(f"def state{i} : State := ⟨" + ", ".join(lean.value(v) for v in state) + "⟩")
+    if witness["kind"] == "relation_mismatch":
+        relation = witness["relation"]
+        args = "state0" if relation == "initial" else "state0 state1"
+        binders, variables = ("(s : State)", "s") if relation == "initial" else ("(s t : State)", "s t")
+        lines += [f"theorem mismatch : ¬ (composed.{relation} {args} ↔ specified_{relation} {args}) := by decide",
+                  f"theorem refutation : ¬ (∀ {binders}, composed.{relation} {variables} ↔ specified_{relation} {variables}) := by",
+                  f"  intro h; exact mismatch (h {args})",
+                  f"theorem source_refutation : ¬ (∀ {binders}, sourceModule.{relation} {variables} ↔ source_specified_{relation} {variables}) := by",
+                  f"  simpa only [source_module_eq, specified_{relation}_agreement] using refutation"]
+    else:
+        lines += ["theorem reach0 : Reactive.Reachable composed state0 := .initial (by decide)"]
+        n = len(witness["states"]) - 1
+        for i in range(n):
+            lines.append(f"theorem reach{i+1} : Reactive.Reachable composed state{i+1} := .step reach{i} (by decide)")
+        j = witness["invariant"]
+        lines += [f"theorem bad : ¬ inv{j} state{n} := by decide",
+                  f"theorem refutation : ¬ (∀ s, Reactive.Reachable composed s → inv{j} s) := by",
+                  f"  intro h; exact bad (h state{n} reach{n})",
+                  f"theorem source_refutation : ¬ (∀ s, Reactive.Reachable sourceModule s → sourceInv{j} s) := by",
+                  f"  simpa only [source_module_eq, inv_agreement{j}] using refutation"]
+    lines += ["#print axioms refutation", "#print axioms source_refutation"]
+    proof = "by\n" + indent(lean.tactic(names + [f"state{i}" for i in range(len(witness["states"]))]), "  ")
+    return ("\n".join(lines) + "\n").replace("by decide", proof)
 
 
 def verify(spec, *, directory=None, timeout=60, depth=10):
@@ -373,20 +401,18 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
     try:
         model = prepare_model(spec)
         origin = identity(spec, model)
-        artifact = dict(**origin, version=2, fields=model["fields"], atoms=model["atoms"],
-            invariants=model["invariants"], relations=model["relations"], graphs=model["graphs"],
-            native_graphs=model["native_graphs"], native_module=model["native_module"],
+        artifact = dict(**origin, version=3, pipeline="Python → Lean RM definitions → checked theorem", fields=model["fields"], atoms=model["atoms"],
+            invariants=model["invariants"], relations=model["relations"],
             programs=[{k: v for k,v in vars(p).items() if k != "function"} for p in model["programs"]])
         artifact["sha256"] = hashlib.sha256(json.dumps(artifact, sort_keys=True).encode()).hexdigest()
         (evidence / "artifact.json").write_text(json.dumps(artifact, indent=2)+"\n")
-        (evidence / "module.rm").write_text(model["native_module"]+"\n")
         for p in model["invariants"] + model["relations"]:
             report.properties[p["identifier"]] = dict(status="unknown")
         lean.prepare(evidence)
         lean.build(evidence, timeout)
         source, names = definitions(model)
         audits = ([f"Verified.translation{i}" for i in range(len(model["programs"]))]
-                  + [f"Verified.atom_agreement{i}" for i in range(len(model["atoms"]))]
+                  + [name for i in range(len(model["atoms"])) for name in (f"Verified.atom_agreement{i}", f"Verified.atom_respects{i}")]
                   + [f"Verified.inv_agreement{i}" for i in range(len(model["invariants"]))]
                   + [f"Verified.specified_{r['name']}_agreement" for r in model["relations"]]
                   + ["Verified.source_module_eq", "Verified.composition_correspondence", "Verified.well_formed",
@@ -396,9 +422,9 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
         if reason:
             report.diagnostics.append(reason)
         if report.translation == "proved":
-            report.diagnostics.append(f"{differential(spec, model)} Python/RM probes passed (regression evidence only)")
+            report.diagnostics.append(f"{differential(spec, model)} Python/source probes passed (regression evidence only)")
             status, reason = lean.run(evidence, "Invariants", invariant_proof(model, names),
-                                     ["invariant", "always_safe", "source_invariant"], timeout)
+                                     ["invariant", "always_safe", "source_invariant", "veil_invariant"], timeout)
             for p in model["invariants"]:
                 report.properties[p["identifier"]] = dict(status=status)
             if reason:
@@ -409,8 +435,20 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
                 report.properties[r["identifier"]] = dict(status=status)
                 if reason:
                     report.diagnostics.append(reason)
+            unresolved = {key for key, p in report.properties.items() if p["status"] == "unknown"}
+            if unresolved:
+                from .solver import composition_counterexamples
+                for identifier, witness in composition_counterexamples(model, depth, timeout, unresolved).items():
+                    name = "Witness" + str(list(report.properties).index(identifier))
+                    (evidence/f"{name}.json").write_text(json.dumps(witness, indent=2)+"\n")
+                    status, reason = lean.run(evidence, name, witness_proof(witness, names),
+                                             ["refutation", "source_refutation"], timeout)
+                    if status == "proved":
+                        report.properties[identifier] = dict(status="refuted", witness=witness)
+                    elif reason:
+                        report.diagnostics.append(reason)
             statuses = {p["status"] for p in report.properties.values()}
-            report.status = "error" if "error" in statuses else "unknown" if "unknown" in statuses else "proved"
+            report.status = "error" if "error" in statuses else "refuted" if "refuted" in statuses else "unknown" if "unknown" in statuses else "proved"
         if identity(spec, model) != origin:
             report.translation = "error"
             for p in report.properties.values():
@@ -426,4 +464,11 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
         report.status = "error"
         report.diagnostics.append(f"{type(error).__name__}: {error}")
     (evidence / "report.json").write_text(json.dumps(asdict(report), indent=2)+"\n")
+    if 'origin' in locals() and (evidence/"recheck.py").exists():
+        try: lean.seal(evidence, origin["sources"], timeout)
+        except (RuntimeError, OSError) as error:
+            report.status = report.translation = "error"
+            for property_ in report.properties.values(): property_["status"] = "unknown"
+            report.diagnostics.append(str(error))
+            (evidence/"report.json").write_text(json.dumps(asdict(report), indent=2)+"\n")
     return report

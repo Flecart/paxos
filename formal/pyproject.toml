@@ -7,7 +7,7 @@ name = "rmverify"
 version = "0.1.0"
 description = "Check typed Python reactive programs and properties with Lean"
 requires-python = ">=3.12,<3.14"
-dependencies = ["zrth==0.1.0"]
+dependencies = ["z3-solver==4.16.0.0"]
 
 [project.scripts]
 rmverify = "rmverify.__main__:main"
@@ -18,4 +18,4 @@ packages = ["rmverify", "examples"]
 py-modules = ["counter"]
 
 [tool.setuptools.package-data]
-rmverify = ["lean/*.lean", "lean/lean-toolchain"]
+rmverify = ["lean/*.lean", "lean/lean-toolchain", "lean/*.json", "lean/*.toml"]

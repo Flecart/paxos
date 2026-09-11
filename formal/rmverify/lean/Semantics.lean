@@ -109,48 +109,6 @@ def Outcome.outputs (fields : Nat) : Outcome → List Int
     (if p then a else b).outputs n = if p then a.outputs n else b.outputs n := by
   by_cases h : p <;> simp [h]
 
-/-- Independent ordered-wire execution; it does not call the source interpreter. -/
-def execute (cursor : Nat) (terms : List Expr) (env : Env) : Env :=
-  match terms with
-  | [] => env
-  | term :: rest => execute (cursor + 1) rest (update env cursor (term.eval env))
-
-structure Graph where
-  inputs : Nat
-  terms : List Expr
-  outputs : List Nat
-
-def Graph.run (g : Graph) (env : Env) : List Int :=
-  g.outputs.map (execute g.inputs g.terms env)
-
-structure Model (State Action : Type) where
-  initial : State
-  step : State → Action → State
-
-inductive Reachable (m : Model State Action) : State → Prop where
-  | initial : Reachable m m.initial
-  | step : Reachable m s → Reachable m (m.step s action)
-
-theorem invariant_of_induction (m : Model State Action) (p : State → Prop)
-    (initial : p m.initial)
-    (preserved : ∀ s action, p s → p (m.step s action)) :
-    ∀ s, Reachable m s → p s := by
-  intro s h
-  induction h with
-  | initial => exact initial
-  | step _ ih => exact preserved _ _ ih
-
-theorem invariant_always (m : Model State Action) (p : State → Prop)
-    (safe : ∀ s, Reachable m s → p s)
-    (states : Nat → State) (actions : Nat → Action)
-    (start : states 0 = m.initial)
-    (round : ∀ n, states (n+1) = m.step (states n) (actions n)) :
-    ∀ n, p (states n) := by
-  intro n
-  apply safe
-  induction n with
-  | zero => rw [start]; exact .initial
-  | succ n ih => rw [round]; exact .step ih
 
 end RMVerify
 
@@ -164,6 +122,17 @@ structure Atom (State : Type) where
   awaits : List Nat
   initial : State → Prop
   step : State → State → Prop
+
+/-- Equality of a finite set of state coordinates. -/
+def AgreeOn (value : State → Nat → Int) (coordinates : List Nat) (s t : State) : Prop :=
+  ∀ i ∈ coordinates, value s i = value t i
+
+/-- Reads cannot depend on undeclared old/new coordinates; initialization
+    constrains only owned coordinates. -/
+def Atom.Respects (a : Atom State) (value : State → Nat → Int) : Prop :=
+  (∀ s t, AgreeOn value a.controls s t → (a.initial s ↔ a.initial t)) ∧
+  (∀ s s' t t', AgreeOn value (a.controls ++ a.reads) s s' →
+    AgreeOn value (a.controls ++ a.awaits) t t' → (a.step s t ↔ a.step s' t'))
 
 structure Module (State : Type) where
   atoms : List (Atom State)
@@ -231,3 +200,69 @@ theorem invariant_always (m : Module State) (p : State → Prop)
   | succ n ih => exact .step ih (round n)
 
 end RMVerify.Reactive
+
+namespace RMVerify
+
+structure Model (State Action : Type) where
+  initial : State
+  step : State → Action → State
+
+inductive Reachable (m : Model State Action) : State → Prop where
+  | initial : Reachable m m.initial
+  | step : Reachable m s → Reachable m (m.step s action)
+
+/-- A deterministic API is one atom in the same relational RM semantics. -/
+def Model.toModule (m : Model State Action) : Reactive.Module State :=
+  ⟨[⟨[], [], [], fun s => s = m.initial, fun s t => ∃ action, t = m.step s action⟩]⟩
+
+theorem reachable_iff (m : Model State Action) (s : State) :
+    Reachable m s ↔ Reactive.Reachable m.toModule s := by
+  constructor
+  · intro h
+    induction h with
+    | initial => exact .initial (by simp [Model.toModule, Reactive.Module.initial])
+    | @step s action _ ih =>
+      apply Reactive.Reachable.step ih
+      simp only [Model.toModule, Reactive.Module.step, List.mem_singleton, forall_eq]
+      exact ⟨action, rfl⟩
+  · intro h
+    induction h with
+    | @initial t h =>
+      have hs : t = m.initial := by simpa [Model.toModule, Reactive.Module.initial] using h
+      rw [hs]; exact .initial
+    | @step s t _ h ih =>
+      have ht : ∃ action, t = m.step s action := by
+        simpa [Model.toModule, Reactive.Module.step] using h
+      rcases ht with ⟨action, rfl⟩
+      exact .step ih
+
+theorem invariant_of_induction (m : Model State Action) (p : State → Prop)
+    (initial : p m.initial)
+    (preserved : ∀ s action, p s → p (m.step s action)) :
+    ∀ s, Reachable m s → p s := by
+  have invariant : ∀ s, Reactive.Reachable m.toModule s → p s := by
+    apply Reactive.invariant_of_induction
+    · intro s hs
+      have h : s = m.initial := by simpa [Model.toModule, Reactive.Module.initial] using hs
+      simpa [h] using initial
+    · intro s t hs ht
+      have h : ∃ action, t = m.step s action := by
+        simpa [Model.toModule, Reactive.Module.step] using ht
+      rcases h with ⟨action, rfl⟩
+      exact preserved s action hs
+  exact fun s h => invariant s ((reachable_iff m s).mp h)
+
+theorem invariant_always (m : Model State Action) (p : State → Prop)
+    (safe : ∀ s, Reachable m s → p s)
+    (states : Nat → State) (actions : Nat → Action)
+    (start : states 0 = m.initial)
+    (round : ∀ n, states (n+1) = m.step (states n) (actions n)) :
+    ∀ n, p (states n) := by
+  intro n
+  apply safe
+  induction n with
+  | zero => rw [start]; exact .initial
+  | succ n ih => rw [round]; exact .step ih
+
+
+end RMVerify

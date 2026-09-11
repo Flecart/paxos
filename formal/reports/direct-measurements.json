@@ -1,0 +1,51 @@
+{
+  "baseline": [
+    {
+      "specification": "examples.counter_spec:spec",
+      "status": "proved",
+      "translation": "proved",
+      "seconds": 10.300605336000444,
+      "lean_bytes": 18707,
+      "translation_bytes": 7329,
+      "evidence": "/tmp/rmverify-baseline/evidence/check-4u6q32rs",
+      "artifact_sha256": "765904905414bc8d29a2e07509d01f8787500cf0232f6fa835b78a02ab615ca7",
+      "lean_toolchain": "leanprover/lean4:v4.30.0"
+    },
+    {
+      "specification": "examples.peterson_v2:peterson",
+      "status": "proved",
+      "translation": "proved",
+      "seconds": 96.08002048299386,
+      "lean_bytes": 54106,
+      "translation_bytes": 40093,
+      "evidence": "/tmp/rmverify-baseline/evidence/compose-tkssk1i1",
+      "artifact_sha256": "d4a6bedc2698a471c5b1dc45ddde34da126ea57895d2384f17b456efecf06966",
+      "lean_toolchain": "leanprover/lean4:v4.30.0"
+    }
+  ],
+  "direct": [
+    {
+      "specification": "examples.counter_spec:spec",
+      "status": "proved",
+      "translation": "proved",
+      "seconds": 12.288027687995054,
+      "lean_bytes": 23728,
+      "translation_bytes": 8532,
+      "evidence": "/home/angeloh/Desktop/work/paxos/formal/.rmverify/direct-measurements/evidence/check-4n5qjy95",
+      "artifact_sha256": "bc143604593fce30dd5386d3f1c894de96e269046ba23eef05e84dad023c7106",
+      "lean_toolchain": "leanprover/lean4:v4.32.0"
+    },
+    {
+      "specification": "examples.peterson_v2:peterson",
+      "status": "proved",
+      "translation": "proved",
+      "seconds": 46.60639465699933,
+      "lean_bytes": 58026,
+      "translation_bytes": 40175,
+      "evidence": "/home/angeloh/Desktop/work/paxos/formal/.rmverify/direct-measurements/evidence/compose-38q2bh85",
+      "artifact_sha256": "0bd19c17371e94d702ed1bf9335402cd5b1f2a436508d9cffd5b9c30403626ad",
+      "lean_toolchain": "leanprover/lean4:v4.32.0"
+    }
+  ],
+  "baseline_commit": "cc60a01a3fccbf6d400c3a85f8061a2df82ddaf8"
+}

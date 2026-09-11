@@ -65,12 +65,12 @@ class CompositionTests(unittest.TestCase):
         self.assertTrue(paper_round(state_object(before), state_object(after)))
         self.assertNotIn(after, successors(model, before))
 
-    def test_peterson_native_rounds(self):
+    def test_peterson_rounds(self):
         model = prepare_model(peterson)
         self.assertEqual(len(model["atoms"]), 2)
         self.assertEqual([a["controls"] for a in model["atoms"]], [[0, 2], [1, 3]])
         self.assertEqual([a["awaits"] for a in model["atoms"]], [[], []])
-        self.assertNotIn("run1", model["native_module"])
+        self.assertNotIn("run1", model["fields"])
         self.assertEqual(initial_states(model), {(0, 0, a, b) for a,b in product((False,True), repeat=2)})
         states = list(product(range(3), range(3), (False,True), (False,True)))
         for s in states:
@@ -115,20 +115,42 @@ class CompositionTests(unittest.TestCase):
                 self.assertIn("'Verified.composition_correspondence'", (evidence/"Translation.log").read_text())
                 self.assertIn("'source_invariant'", (evidence/"Invariants.log").read_text())
             # An old-value read breaks this invariant; it must never be proved.
-            self.assertFalse(verify(pipeline("produced"), directory=directory, timeout=30).ok)
+            old_report = verify(pipeline("produced"), directory=directory, timeout=30)
+            self.assertEqual(old_report.status, "refuted", old_report)
+            self.assertEqual(old_report.properties['invariant:equal']['witness']['kind'], 'reachable_invariant')
+            from examples.peterson_stuck import peterson as stuck
+            stuck_report = verify(stuck, directory=directory, timeout=120)
+            self.assertEqual(stuck_report.status, "refuted", stuck_report)
+            self.assertEqual(stuck_report.properties['invariant:mutual_exclusion']['status'], 'proved')
+            self.assertEqual(stuck_report.properties['relation:paper_round']['witness']['kind'], 'relation_mismatch')
 
-    def test_corrupt_native_initialization_cannot_pass(self):
-        from rmverify.compiler import compile_composition
-
+    def test_corrupt_generated_wiring_cannot_pass(self):
+        from rmverify import composition
+        original = composition.definitions
         def corrupt(model):
-            graphs, module = compile_composition(model)
-            graph = graphs[0]
-            graph["terms"][graph["outputs"][0]-len(graph["inputs"])] = ("lit", 17)
-            return graphs, module
-
-        with tempfile.TemporaryDirectory(prefix="rmverify-corrupt-composition-") as directory:
-            with patch("rmverify.composition.compile_composition", corrupt):
+            source, names = original(model)
+            start = source.index("def atom1 :")
+            end = source.index("def sourceAtom1 :", start)
+            source = source[:start] + source[start:end].replace("t.«produced»", "s.«produced»") + source[end:]
+            return source, names
+        with tempfile.TemporaryDirectory(prefix="rmverify-wiring-") as directory:
+            with patch.object(composition, 'definitions', corrupt):
                 report = verify(pipeline(Await("produced")), directory=directory, timeout=30)
+            self.assertTrue((Path(report.evidence)/'Translation.lean').exists(), report)
+            self.assertNotEqual(report.translation, 'proved', report)
+
+    def test_corrupt_initialization_cannot_pass(self):
+        from rmverify import lean_backend
+        original = lean_backend.compiled_definition
+        def corrupt(program, i):
+            lines, names = original(program, i)
+            if program.initialize:
+                lines[-1] = "  [17, 0]"
+            return lines, names
+        with tempfile.TemporaryDirectory(prefix="rmverify-corrupt-composition-") as directory:
+            with patch.object(lean_backend, "compiled_definition", corrupt):
+                report = verify(pipeline(Await("produced")), directory=directory, timeout=30)
+            self.assertTrue((Path(report.evidence)/"Translation.lean").exists(), report)
             self.assertNotEqual(report.translation, "proved", report)
             self.assertFalse(report.ok)
 
