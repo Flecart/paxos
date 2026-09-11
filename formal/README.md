@@ -33,6 +33,13 @@ proofs over their joint relation. Plain input bindings read old values;
 unbound inputs, and await cycles are rejected. The original single-class
 `Specification` API remains available.
 
+The intentional stuck-process mutation is preserved in
+[`examples/peterson_stuck.py`](examples/peterson_stuck.py). Its mutual-exclusion
+invariant still holds, but it omits a round allowed by the paper specification.
+Run it with `python -m rmverify examples.peterson_stuck:peterson --timeout 120`;
+v2 currently reports that equivalence as `unknown` because automatic
+counterexample search is not yet connected to composition verification.
+
 ```sh
 formal/.venv/bin/python formal/test_paper.py -v
 formal/.venv/bin/python formal/paper_report.py

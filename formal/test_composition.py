@@ -57,6 +57,14 @@ def state_object(values):
 
 
 class CompositionTests(unittest.TestCase):
+    def test_stuck_process_loses_a_specified_round(self):
+        from examples.peterson_stuck import peterson as stuck
+        before, after = (0, 0, False, False), (1, 0, False, False)
+        model = prepare_model(stuck)
+        self.assertIn(before, initial_states(model))
+        self.assertTrue(paper_round(state_object(before), state_object(after)))
+        self.assertNotIn(after, successors(model, before))
+
     def test_peterson_native_rounds(self):
         model = prepare_model(peterson)
         self.assertEqual(len(model["atoms"]), 2)
