@@ -1,5 +1,5 @@
 name = "rmverifyEvidence"
-defaultTargets = ["Semantics", "VeilAdapter"]
+defaultTargets = ["Semantics", "TypedSource", "Network", "VeilAdapter"]
 
 [[require]]
 name = "veil"
@@ -11,3 +11,9 @@ name = "Semantics"
 
 [[lean_lib]]
 name = "VeilAdapter"
+
+[[lean_lib]]
+name = "TypedSource"
+
+[[lean_lib]]
+name = "Network"

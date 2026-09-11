@@ -77,6 +77,21 @@ class VerificationTests(unittest.TestCase):
                 self.assertFalse(report.ok)
                 self.assertTrue(all(p['status'] != 'proved' for p in report.properties.values()))
 
+    def test_corrupted_state_codecs(self):
+        original = lean_backend.definitions
+        for name in ('encodeState','decodeState'):
+            def corrupt(model):
+                source,names = original(model)
+                lines = source.splitlines()
+                for i,line in enumerate(lines):
+                    if line.startswith(f'def {name} '):
+                        lines[i] = line.split(' := ')[0] + ' := ' + ('[17]' if name == 'encodeState' else '⟨17⟩')
+                return '\n'.join(lines)+'\n',names
+            with self.subTest(codec=name), patch.object(lean_backend,'definitions',corrupt):
+                report = self.verify(counter)
+                self.assertTrue((Path(report.evidence)/'Translation.lean').exists(),report)
+                self.assertNotEqual(report.translation,'proved',report)
+
     def test_invalid_codegen_names_are_rejected(self):
         function = counter.transitions[0]
         original = function.__qualname__

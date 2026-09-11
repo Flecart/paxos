@@ -12,6 +12,7 @@ import tempfile
 from textwrap import indent
 
 from .api import Await, Report
+from .value_types import mutable
 from .checking import function_id, provenance
 from .execution import execute
 from .frontend import (Unsupported, annotation, fields_of, method_program,
@@ -22,6 +23,8 @@ from .lean_backend import state_cases
 
 def prepare_model(spec):
     fields = fields_of(spec.target, require_init=False)
+    if any(mutable(k) for k in fields.values()):
+        raise Unsupported("collection-valued composition requires the typed wiring extension")
     if not spec.components or not spec.invariants:
         raise Unsupported("composition needs components and at least one invariant")
     model = dict(fields=fields, programs=[], atoms=[], invariants=[], relations=[])
@@ -41,6 +44,8 @@ def prepare_model(spec):
         raise Unsupported("v2 requires a closed composition: every state variable needs a controller")
 
     def add(program):
+        if any(mutable(k) for k in program.slots):
+            raise Unsupported("collections in composition require the typed wiring extension")
         model["programs"].append(program)
         return len(model["programs"]) - 1
 

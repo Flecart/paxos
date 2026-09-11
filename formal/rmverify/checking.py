@@ -1,5 +1,7 @@
 """Verification orchestration: compilation is not success until Lean accepts it."""
 from dataclasses import asdict
+from copy import deepcopy
+from .value_types import mutable, matches, probes, json_value
 import hashlib
 import inspect
 import itertools
@@ -11,7 +13,7 @@ import tempfile
 
 from .api import Report
 from .frontend import Unsupported, annotation, fields_of, method_program, parameters, predicate_program
-from .execution import execute
+from .execution import execute, ExecutionFault
 from . import lean_backend as lean
 
 
@@ -53,27 +55,35 @@ def prepare_model(spec):
 
 
 def snapshot(model, obj):
-    result = [getattr(obj, field) for field in model["fields"]]
-    if any(type(value) is not (bool if kind == "bool" else int) for value, kind in zip(result,model["fields"].values())):
+    result = deepcopy([getattr(obj, field) for field in model["fields"]])
+    if any(not matches(value, kind) for value, kind in zip(result,model["fields"].values())):
         raise ValueError("runtime state differs from declared types")
     return result
 
 
 def make_state(model, values):
     obj = object.__new__(model["target"])
-    for name, value in zip(model["fields"], values, strict=True): setattr(obj,name,value)
+    for name, value in zip(model["fields"], values, strict=True): setattr(obj,name,deepcopy(value))
     return obj
 
 
 def python_program(model, index, values):
     program = model["programs"][index]
     if index == 0:
-        obj = model["target"]()
+        obj = object.__new__(model["target"])
+        try: program.function(obj)
+        except KeyError as error:
+            # Uninitialized slots cannot be read by accepted source. They use
+            # the same internal defaults as the typed source frame after failure.
+            values = [getattr(obj,n, {} if k.startswith("dict[") else set() if k.startswith("set[") else False if k == "bool" else 0)
+                      for n,k in model["fields"].items()]
+            raise ExecutionFault(values) from error
         return snapshot(model,obj) + [0]
     method = next((m for m in model["methods"] if m["index"] == index), None)
     if method is not None:
         obj = make_state(model,values[:len(model["fields"])])
-        result = program.function(obj,*values[len(model["fields"]):])
+        try: result = program.function(obj,*values[len(model["fields"]):])
+        except KeyError as error: raise ExecutionFault(snapshot(model,obj)) from error
         expected = {"int":int,"bool":bool,"none":type(None)}[method["result"]]
         if type(result) is not expected: raise ValueError("runtime return type mismatch")
         return snapshot(model,obj) + [0 if result is None else result]
@@ -96,9 +106,14 @@ def differential(model):
     count = 0
     for i,p in enumerate(model["programs"]):
         # Fixed deterministic probes; formal equivalence covers all other inputs.
-        cases = [[False,True] if k == "bool" else [-10**100,-1,0,1,10**100] for k in p.inputs]
+        cases = [probes(k) for k in p.inputs]
         for values in itertools.islice(itertools.product(*cases),128):
-            actual, expected = execute(model["programs"][i],values), python_program(model,i,values)
+            def outcome(run):
+                try: return ("ok", run())
+                except ExecutionFault as error: return ("fault", "missingKey", error.fields)
+                except KeyError: return ("fault", "missingKey", [])
+            actual = outcome(lambda: execute(model["programs"][i],values))
+            expected = outcome(lambda: python_program(model,i,values))
             if actual != expected: raise ValueError(f"translation mismatch in {p.name}: {values}: Python={expected}, RM={actual}")
             count += 1
     return count
@@ -176,19 +191,23 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
     evidence = Path(tempfile.mkdtemp(prefix="check-",dir=parent))
     report = Report("error",evidence=str(evidence))
     status_path = evidence / "report.json"
-    status_path.write_text(json.dumps(asdict(report),indent=2)+"\n")
+    status_path.write_text(json.dumps(asdict(report),indent=2,default=json_value)+"\n")
     try:
         model = prepare_model(spec)
+        backend = lean
+        if any(mutable(k) for p in model["programs"] for k in p.slots):
+            from . import typed_backend as backend
         provenance = identity(spec,model)
         artifact = dict(**provenance,version=3,pipeline="Python → Lean RM definitions → checked theorem",fields=model["fields"],programs=[{k:v for k,v in vars(p).items() if k != "function"} for p in model["programs"]],
                         invariants=[{k:v for k,v in p.items() if k != "function"} for p in model["invariants"]],contracts=model["contracts"])
-        artifact["sha256"] = hashlib.sha256(json.dumps(artifact,sort_keys=True).encode()).hexdigest()
-        (evidence/"artifact.json").write_text(json.dumps(artifact,indent=2)+"\n")
+        artifact["sha256"] = hashlib.sha256(json.dumps(artifact,sort_keys=True,default=json_value).encode()).hexdigest()
+        (evidence/"artifact.json").write_text(json.dumps(artifact,indent=2,default=json_value)+"\n")
         for p in [*model["invariants"],*model["contracts"]]: report.properties[p["identifier"]] = dict(status="unknown")
+        if backend is not lean: report.properties["no-fault"] = dict(status="unknown")
         lean.prepare(evidence)
-        lean.build(evidence,timeout)
-        source, names = lean.definitions(model)
-        report.translation, diagnostic = lean.run(evidence,"Translation",source,[f"Verified.translation{i}" for i in range(len(model["programs"]))] + ["Verified.source_model_eq"] + [f"Verified.inv_agreement{i}" for i in range(len(model["invariants"]))] + [name for i in range(len(model["contracts"])) for name in (f"Verified.pre_agreement{i}", f"Verified.post_agreement{i}")],timeout,output=True)
+        lean.build(evidence,timeout,typed=backend is not lean)
+        source, names = backend.definitions(model)
+        report.translation, diagnostic = lean.run(evidence,"Translation",source,[f"Verified.translation{i}" for i in range(len(model["programs"]))] + ["Verified.source_model_eq"] + [f"Verified.inv_agreement{i}" for i in range(len(model["invariants"]))] + [name for i in range(len(model["contracts"])) for name in (f"Verified.pre_agreement{i}", f"Verified.post_agreement{i}")] + (backend.extra_audits(model) if backend is not lean else ["Verified.encodeState_correct", "Verified.decodeState_correct"]),timeout,output=True)
         if report.translation != "proved":
             report.status = report.translation
             report.diagnostics.append(diagnostic)
@@ -201,22 +220,30 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
             for trace in spec.checks:
                 try: report.checks.append(check_trace(model,trace))
                 except (ValueError,TypeError,AssertionError) as error: report.checks.append(dict(status="failed",reason=str(error)))
-            inv_status, reason = lean.run(evidence,"Invariants",lean.invariant_proof(model,names),["invariant","always_safe","source_invariant","veil_invariant"],timeout,output=True)
+            inv_status, reason = lean.run(evidence,"Invariants",backend.invariant_proof(model,names),["invariant","always_safe","source_invariant","veil_invariant"] + (["no_fault"] if backend is not lean else []),timeout,output=True)
             for p in model["invariants"]: report.properties[p["identifier"]] = dict(status=inv_status)
+            if backend is not lean: report.properties["no-fault"] = dict(status=inv_status)
             if reason: report.diagnostics.append(reason)
             for i,c in enumerate(model["contracts"]):
-                status, reason = lean.run(evidence,f"Contract{i}",lean.contract_proof(model,names,i,inv_status=="proved"),["contract","source_contract"],timeout)
+                status, reason = lean.run(evidence,f"Contract{i}",backend.contract_proof(model,names,i,inv_status=="proved"),["contract","source_contract"],timeout)
                 report.properties[c["identifier"]] = dict(status=status)
                 if reason: report.diagnostics.append(reason)
             unresolved = {key for key,value in report.properties.items() if value["status"] == "unknown"}
             for key in unresolved:
                 report.properties[key]["reason"] = "automatic proof did not close; consider additional strengthening predicates"
-            if unresolved:
+            if unresolved and backend is lean:
                 from .solver import counterexamples
                 for identifier, witness in counterexamples(model,depth,timeout,unresolved).items():
                     name = "Witness" + str(list(report.properties).index(identifier))
                     (evidence/f"{name}.json").write_text(json.dumps(witness,indent=2)+"\n")
                     status, reason = lean.run(evidence,name,lean.witness_proof(model,witness),["refutation","source_refutation"],timeout)
+                    if status == "proved": report.properties[identifier] = dict(status="refuted",witness=witness)
+                    elif reason: report.diagnostics.append(reason)
+            if unresolved and backend is not lean:
+                for identifier,witness in backend.counterexamples(model,depth,unresolved).items():
+                    name = "FaultWitness" if identifier == "no-fault" else "Witness" + str(list(report.properties).index(identifier))
+                    (evidence/f"{name}.json").write_text(json.dumps(witness,indent=2,default=json_value)+"\n")
+                    status,reason = lean.run(evidence,name,backend.witness_proof(model,witness,names),["refutation","source_refutation"],timeout)
                     if status == "proved": report.properties[identifier] = dict(status="refuted",witness=witness)
                     elif reason: report.diagnostics.append(reason)
             statuses = {p["status"] for p in report.properties.values()}
@@ -235,12 +262,12 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
     except Exception as error:
         report.status = "error"
         report.diagnostics.append(f"{type(error).__name__}: {error}")
-    status_path.write_text(json.dumps(asdict(report),indent=2)+"\n")
+    status_path.write_text(json.dumps(asdict(report),indent=2,default=json_value)+"\n")
     if 'provenance' in locals() and (evidence/"recheck.py").exists():
         try: lean.seal(evidence, provenance["sources"], timeout)
         except (RuntimeError, OSError) as error:
             report.status = report.translation = "error"
             for property_ in report.properties.values(): property_["status"] = "unknown"
             report.diagnostics.append(str(error))
-            status_path.write_text(json.dumps(asdict(report),indent=2)+"\n")
+            status_path.write_text(json.dumps(asdict(report),indent=2,default=json_value)+"\n")
     return report

@@ -71,7 +71,7 @@ def tactic(names, *, contextual=True):
 
 def prepare(directory):
     library = SEMANTICS.parent
-    for name in ("Semantics.lean", "VeilAdapter.lean", "lean-toolchain", "lakefile.toml", "lake-manifest.json"):
+    for name in ("Semantics.lean", "TypedSource.lean", "Network.lean", "VeilAdapter.lean", "lean-toolchain", "lakefile.toml", "lake-manifest.json"):
         shutil.copyfile(library/name, directory/name)
     shutil.copyfile(Path(__file__).with_name("recheck.py"), directory/"recheck.py")
     # Reuse installed dependencies locally. The manifest still supports fresh
@@ -121,16 +121,17 @@ def command(directory, arguments, log, timeout):
     return process.returncode
 
 
-def build(directory, timeout):
+def build(directory, timeout, *, typed=False):
     if not (directory/".lake/packages/veil/.lake/build/lib/lean/Veil/Base.olean").exists():
         code = command(directory, ["lake", "--no-cache", "build"], directory/"build.log", timeout)
         if code is None: raise subprocess.TimeoutExpired("Lean dependency build", timeout)
         if code: raise RuntimeError("Lean dependency build failed; see build.log")
     (directory/".lake/build/lib/lean").mkdir(parents=True, exist_ok=True)
-    for name, audits in (("Semantics", []), ("VeilAdapter", ["RMVerify.Reactive.veil_initial",
+    for name, audits in (("Semantics", []), ("TypedSource", []), ("VeilAdapter", ["RMVerify.Reactive.veil_initial",
                           "RMVerify.Reactive.veil_round", "RMVerify.Reactive.veil_reachable"])):
+        if name == "TypedSource" and not typed: continue
         status, reason = run(directory, name, (directory/f"{name}.lean").read_text(), audits, timeout, output=True)
-        if status == "unknown": raise subprocess.TimeoutExpired(reason, timeout)
+        if status == "unknown" and "timed out" in reason: raise subprocess.TimeoutExpired(reason, timeout)
         if status != "proved": raise RuntimeError(reason)
 
 
@@ -235,6 +236,13 @@ def definitions(model):
     for i,k in enumerate(model["fields"].values()): lines.append(f"  «{list(model['fields'])[i]}» : {kind(k)}")
     lines += ["  deriving Repr, DecidableEq", "def encodeState (s : State) : List Int := " + lean_list(encode(k, f"s.«{list(model['fields'])[i]}»") for i,k in enumerate(model["fields"].values())),
               "def decodeState (values : List Int) : State := ⟨" + ", ".join(decode(k, f"environment values {i}") for i,k in enumerate(model["fields"].values())) + "⟩"]
+    # Check the shared codec against independently emitted field bindings.
+    encoded = [f"(if s.«{n}» then 1 else 0)" if k == "bool" else f"s.«{n}»" for n,k in model["fields"].items()]
+    decoded = [f"«{n}» := " + (f"(environment values {i} != 0)" if k == "bool" else f"environment values {i}")
+               for i,(n,k) in enumerate(model["fields"].items())]
+    lines += ["theorem encodeState_correct (s : State) : encodeState s = [" + ", ".join(encoded) + "] := by rfl",
+              "theorem decodeState_correct (values : List Int) : decodeState values = {" + ", ".join(decoded) + "} := by rfl",
+              "#print axioms encodeState_correct", "#print axioms decodeState_correct"]
     names += ["encodeState", "decodeState"]
     lines += ["inductive Action where"]
     for j,m in enumerate(model["methods"]): lines.append(f"  | m{j} {arguments(m['inputs'])}")
