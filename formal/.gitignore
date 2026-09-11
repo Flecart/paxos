@@ -1,8 +1,13 @@
 .venv/
 .cache/
 __pycache__/
-lean/.lake/
+.lake/
+*.olean
+*.ilean
 .rmverify/
+# Reproducible output from the earlier verification pipelines.
+/native-evidence/
+/protocol-evidence/
 *.egg-info/
 build/
 dist/
