@@ -11,23 +11,21 @@ import subprocess
 import tempfile
 from textwrap import indent
 
-from .api import Await, Report
-from .value_types import mutable
+from .api import Await, Choice, Report
+from .value_types import mutable, typed, parts, data, matches
 from .checking import function_id, provenance
 from .execution import execute
 from .frontend import (Unsupported, annotation, fields_of, method_program,
-                       parameters, predicate_program)
+                       parameters, predicate_program, referenced_programs, domain_program)
 from . import lean_backend as lean
 from .lean_backend import state_cases
 
 
 def prepare_model(spec):
     fields = fields_of(spec.target, require_init=False)
-    if any(mutable(k) for k in fields.values()):
-        raise Unsupported("collection-valued composition requires the typed wiring extension")
     if not spec.components or not spec.invariants:
         raise Unsupported("composition needs components and at least one invariant")
-    model = dict(fields=fields, programs=[], atoms=[], invariants=[], relations=[])
+    model = dict(fields=fields, programs=[], atoms=[], invariants=[], relations=[], domains=[])
     names = list(fields)
     owners = {}
     for i, component in enumerate(spec.components):
@@ -44,30 +42,31 @@ def prepare_model(spec):
         raise Unsupported("v2 requires a closed composition: every state variable needs a controller")
 
     def add(program):
-        if any(mutable(k) for k in program.slots):
-            raise Unsupported("collections in composition require the typed wiring extension")
         model["programs"].append(program)
         return len(model["programs"]) - 1
 
+    ghosts = [i for i,c in enumerate(spec.components) if c.ghost]
+    if len(ghosts)>1: raise Unsupported("use one deterministic observer component for ghost history")
+    if ghosts and len(ghosts)==len(spec.components): raise Unsupported("an observer requires executable components")
     dependencies = {}
     for i, component in enumerate(spec.components):
-        if type(component.stutter) is not bool:
-            raise Unsupported("stutter must be a Boolean")
+        if type(component.stutter) is not bool or type(component.ghost) is not bool:
+            raise Unsupported("stutter and ghost must be Booleans")
         local = fields_of(component.target)
         controlled = [names.index(component.controls[n]) for n in local]
         atom = dict(name=f"{i}:{component.target.__qualname__}", component=i,
                     controls=controlled, reads=list(controlled), awaits=[],
-                    initial=[], actions=[], stutter=component.stutter)
+                    initial=[], actions=[], stutter=component.stutter, ghost=component.ghost)
         init_params = parameters(component.target.__init__)[1:]
         if set(component.initial_inputs) - {p.name for p in init_params}:
             raise Unsupported("unknown initializer parameter")
         domains = []
         for p in init_params:
-            kind = annotation(p.annotation)
+            kind = annotation(p.annotation,namespace=component.target.__init__.__globals__)
             domain = component.initial_inputs.get(p.name, (False, True) if kind == "bool" else ())
             if not isinstance(domain, (tuple, list)) or not domain:
                 raise Unsupported("initializer arguments need a nonempty finite domain (Bool defaults to both values)")
-            if any(type(v) is not (bool if kind == "bool" else int) for v in domain):
+            if any(not matches(v,kind) for v in domain):
                 raise Unsupported("initializer domain type mismatch")
             domains.append(domain)
         count = 1
@@ -84,6 +83,8 @@ def prepare_model(spec):
             atom["initial"].append(dict(index=index, arguments=arguments))
         if not component.transitions or len(set(component.transitions)) != len(component.transitions):
             raise Unsupported("select distinct component transition methods")
+        if component.ghost and (component.stutter or len(component.transitions)!=1 or len(atom["initial"])!=1):
+            raise Unsupported("ghost observer must have one initializer, one transition, and stutter=False")
         used_ports = set()
         dependencies[i] = set()
         for f in component.transitions:
@@ -98,10 +99,41 @@ def prepare_model(spec):
                 if p.name not in component.inputs:
                     raise Unsupported(f"unbound input port: {p.name}")
                 binding = component.inputs[p.name]
+                if isinstance(binding, Choice):
+                    if component.ghost: raise Unsupported("ghost observers cannot make environmental choices")
+                    variable = binding.domain
+                    if callable(variable):
+                        domain=domain_program(variable,fields,spec.target)
+                        if parts(domain.result)[0]!=kind:raise Unsupported("Choice domain element type mismatch")
+                        reads=set()
+                        def visit(e):
+                            if not isinstance(e,tuple):return
+                            if e and e[0]=="var" and e[1]<len(fields):reads.add(e[1])
+                            for x in e:visit(x)
+                        visit(domain.body)
+                        if any(spec.components[owners[names[n]]].ghost for n in reads):raise Unsupported("executable choices cannot read ghost history")
+                        index=add(domain);model["domains"].append(index)
+                        ports.append(dict(domain=index,awaited=False,choice=True))
+                        atom["reads"].extend(reads)
+                        continue
+                    if isinstance(variable,(tuple,list)):
+                        if not all(matches(v,kind) for v in variable):raise Unsupported("Choice domain element type mismatch")
+                        ports.append(dict(choices=list(variable),kind=kind,awaited=False,choice=True))
+                        continue
+                    if not isinstance(variable, str) or variable not in fields or not mutable(fields[variable]):
+                        raise Unsupported("Choice domain must name a finite collection in the previous state")
+                    if parts(fields[variable])[0] != kind:
+                        raise Unsupported(f"choice element type mismatch: {p.name}")
+                    if spec.components[owners[variable]].ghost and not component.ghost: raise Unsupported("executable choices cannot read ghost history")
+                    slot = names.index(variable)
+                    ports.append(dict(variable=slot, awaited=False, choice=True))
+                    atom["reads"].append(slot)
+                    continue
                 awaited = isinstance(binding, Await)
                 variable = binding.variable if awaited else binding
                 if not isinstance(variable, str) or variable not in fields or fields[variable] != kind:
                     raise Unsupported(f"unknown or ill-typed input port: {p.name}")
+                if spec.components[owners[variable]].ghost and not component.ghost: raise Unsupported("executable components cannot read ghost history")
                 slot = names.index(variable)
                 ports.append(dict(variable=slot, awaited=awaited))
                 atom["awaits" if awaited else "reads"].append(slot)
@@ -130,6 +162,8 @@ def prepare_model(spec):
         if function is not None:
             model["relations"].append(dict(name=name, identifier="relation:"+function.__qualname__,
                 index=add(predicate_program(function, fields, spec.target, kinds))))
+    model["programs"] = referenced_programs(model["programs"])
+    model["backend"] = "typed" if (bool(ghosts) or bool(model["domains"]) or any(p.get("choice") for a in model["atoms"] for m in a["actions"] for p in m["ports"]) or any(typed(k) for p in model["programs"] for k in [*p.slots,p.result]) or any(p.helpers for p in model["programs"])) else "scalar"
     return model
 
 
@@ -138,13 +172,13 @@ def identity(spec, model):
     for c in spec.components:
         components.append(dict(target=[c.target.__module__, c.target.__qualname__],
             initial=function_id(c.target.__init__), transitions=[function_id(f) for f in c.transitions],
-            controls=c.controls, inputs={k: asdict(v) if isinstance(v, Await) else v for k,v in c.inputs.items()},
-            initial_inputs=c.initial_inputs, stutter=c.stutter))
+            controls=c.controls, inputs={k: ({"domain_function":function_id(v.domain)} if isinstance(v,Choice) and callable(v.domain) else data(asdict(v)) if isinstance(v,(Await,Choice)) else v) for k,v in c.inputs.items()},
+            initial_inputs=c.initial_inputs, stutter=c.stutter, ghost=c.ghost))
     result = dict(**provenance(model["programs"], [spec.target, *(c.target for c in spec.components)]),
         specification=dict(target=[spec.target.__module__, spec.target.__qualname__], components=components,
             invariants=[function_id(f) for f in spec.invariants], strengthening=[function_id(f) for f in spec.strengthening],
             initial_relation=function_id(spec.initial_relation), step_relation=function_id(spec.step_relation)))
-    return json.loads(json.dumps(result))  # Snapshot mutable specification mappings too.
+    return json.loads(json.dumps(data(result)))  # Snapshot mutable specification mappings too.
 
 
 def definitions(model):
@@ -406,47 +440,60 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
     try:
         model = prepare_model(spec)
         origin = identity(spec, model)
-        artifact = dict(**origin, version=3, pipeline="Python → Lean RM definitions → checked theorem", fields=model["fields"], atoms=model["atoms"],
+        backend = __import__(__package__ + ".typed_composition", fromlist=["*"]) if model["backend"] == "typed" else __import__(__name__, fromlist=["*"])
+        artifact = dict(**origin, version=4, pipeline="Python → Lean RM definitions → checked theorem", fields=model["fields"], atoms=model["atoms"],
             invariants=model["invariants"], relations=model["relations"],
-            programs=[{k: v for k,v in vars(p).items() if k != "function"} for p in model["programs"]])
-        artifact["sha256"] = hashlib.sha256(json.dumps(artifact, sort_keys=True).encode()).hexdigest()
-        (evidence / "artifact.json").write_text(json.dumps(artifact, indent=2)+"\n")
+            programs=[{k: v for k,v in vars(p).items() if k not in ("function", "helpers")} for p in model["programs"]])
+        artifact["sha256"] = hashlib.sha256(json.dumps(data(artifact), sort_keys=True).encode()).hexdigest()
+        (evidence / "artifact.json").write_text(json.dumps(data(artifact), indent=2)+"\n")
         for p in model["invariants"] + model["relations"]:
             report.properties[p["identifier"]] = dict(status="unknown")
+        if model["backend"] == "typed": report.properties["no-fault"] = dict(status="unknown")
         lean.prepare(evidence)
-        lean.build(evidence, timeout)
-        source, names = definitions(model)
+        lean.build(evidence, timeout, typed=model["backend"] == "typed")
+        source, names = backend.definitions(model)
         audits = ([f"Verified.translation{i}" for i in range(len(model["programs"]))]
                   + [name for i in range(len(model["atoms"])) for name in (f"Verified.atom_agreement{i}", f"Verified.atom_respects{i}")]
                   + [f"Verified.inv_agreement{i}" for i in range(len(model["invariants"]))]
                   + [f"Verified.specified_{r['name']}_agreement" for r in model["relations"]]
                   + ["Verified.source_module_eq", "Verified.composition_correspondence", "Verified.well_formed",
                      "Verified.initial_nonempty", "Verified.nonblocking"])
+        if model["backend"] == "typed": audits += backend.extra_audits(model)
         report.translation, reason = lean.run(evidence, "Translation", source, audits, timeout, output=True)
         report.status = report.translation
         if reason:
             report.diagnostics.append(reason)
         if report.translation == "proved":
-            report.diagnostics.append(f"{differential(spec, model)} Python/source probes passed (regression evidence only)")
-            status, reason = lean.run(evidence, "Invariants", invariant_proof(model, names),
+            report.diagnostics.append(f"{backend.differential(spec, model)} Python/source probes passed (regression evidence only)")
+            status, reason = lean.run(evidence, "Invariants", backend.invariant_proof(model, names),
                                      ["invariant", "always_safe", "source_invariant", "veil_invariant"], timeout)
             for p in model["invariants"]:
                 report.properties[p["identifier"]] = dict(status=status)
+            if model["backend"] == "typed": report.properties["no-fault"] = dict(status=status)
             if reason:
                 report.diagnostics.append(reason)
+            if model["backend"] == "typed" and status != "proved":
+                healthy,reason=lean.run(evidence,"NoFault",backend.no_fault_proof(model,names),["invariant","source_invariant"],timeout)
+                report.properties["no-fault"]=dict(status=healthy)
+                if reason:report.diagnostics.append(reason)
             for r in model["relations"]:
-                status, reason = lean.run(evidence, r["name"].capitalize()+"Relation", relation_proof(r, names),
+                status, reason = lean.run(evidence, r["name"].capitalize()+"Relation", backend.relation_proof(r, names),
                                          ["relation", "source_relation"], timeout)
                 report.properties[r["identifier"]] = dict(status=status)
                 if reason:
                     report.diagnostics.append(reason)
             unresolved = {key for key, p in report.properties.items() if p["status"] == "unknown"}
+            if unresolved.intersection(p["identifier"] for p in model["invariants"]):
+                from .symbolic import search
+                for query in search(evidence,model,names,composition=True,typed=model["backend"]=="typed",depth=depth,timeout=timeout):
+                    report.diagnostics.append(f"Veil {query['kind']}: {query['status']} (diagnostic only; {query['log']})")
             if unresolved:
                 from .solver import composition_counterexamples
+                if model["backend"] == "typed": composition_counterexamples = backend.counterexamples
                 for identifier, witness in composition_counterexamples(model, depth, timeout, unresolved).items():
                     name = "Witness" + str(list(report.properties).index(identifier))
-                    (evidence/f"{name}.json").write_text(json.dumps(witness, indent=2)+"\n")
-                    status, reason = lean.run(evidence, name, witness_proof(witness, names),
+                    (evidence/f"{name}.json").write_text(json.dumps(data(witness), indent=2)+"\n")
+                    status, reason = lean.run(evidence, name, backend.witness_proof(witness, names, model) if model["backend"] == "typed" else witness_proof(witness, names),
                                              ["refutation", "source_refutation"], timeout)
                     if status == "proved":
                         report.properties[identifier] = dict(status="refuted", witness=witness)
@@ -468,12 +515,12 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
     except Exception as error:
         report.status = "error"
         report.diagnostics.append(f"{type(error).__name__}: {error}")
-    (evidence / "report.json").write_text(json.dumps(asdict(report), indent=2)+"\n")
+    (evidence / "report.json").write_text(json.dumps(data(report), indent=2)+"\n")
     if 'origin' in locals() and (evidence/"recheck.py").exists():
         try: lean.seal(evidence, origin["sources"], timeout)
         except (RuntimeError, OSError) as error:
             report.status = report.translation = "error"
             for property_ in report.properties.values(): property_["status"] = "unknown"
             report.diagnostics.append(str(error))
-            (evidence/"report.json").write_text(json.dumps(asdict(report), indent=2)+"\n")
+            (evidence/"report.json").write_text(json.dumps(data(report), indent=2)+"\n")
     return report

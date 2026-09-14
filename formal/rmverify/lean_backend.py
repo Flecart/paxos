@@ -11,7 +11,7 @@ import subprocess
 from textwrap import indent
 
 
-from .recheck import audit, lean_environment
+from .recheck import audit, lean_environment, solver_plugins
 
 SEMANTICS = Path(__file__).with_name("lean") / "Semantics.lean"
 UNFOLD = "RMVerify.environment, RMVerify.update, RMVerify.Expr.eval, RMVerify.Op.eval, RMVerify.Stmt.exec, List.range_succ, Bool.eq_not, Bool.not_eq, Id.run, Bind.bind, Pure.pure"
@@ -66,12 +66,12 @@ def tactic(names, *, contextual=True):
     location = "" if contextual else " at *"
     return (f"{initial} [{', '.join(names)}, {UNFOLD}]{location}\n"
             f"all_goals (repeat' (first | omega | split <;> {simplify} [{UNFOLD}]))\n"
-            "all_goals first | omega | grind [RMVerify.flag]")
+            "all_goals first | omega | grind (splits := 64) [RMVerify.flag]")
 
 
 def prepare(directory):
     library = SEMANTICS.parent
-    for name in ("Semantics.lean", "TypedSource.lean", "Network.lean", "VeilAdapter.lean", "lean-toolchain", "lakefile.toml", "lake-manifest.json"):
+    for name in ("Semantics.lean", "TypedSource.lean", "Borrowing.lean", "Network.lean", "VeilAdapter.lean", "lean-toolchain", "lakefile.toml", "lake-manifest.json"):
         shutil.copyfile(library/name, directory/name)
     shutil.copyfile(Path(__file__).with_name("recheck.py"), directory/"recheck.py")
     # Reuse installed dependencies locally. The manifest still supports fresh
@@ -92,7 +92,7 @@ def seal(directory, sources, timeout):
         (snapshot/f"{digest}.py").write_bytes(content)
     manifest_path = directory/"recheck.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {"obligations": []}
-    manifest["version"] = 3
+    manifest["version"] = 4
     manifest["timeout"] = timeout
     manifest["files"] = {str(p.relative_to(directory)): hashlib.sha256(p.read_bytes()).hexdigest()
                          for p in [*directory.glob("*.lean"), *directory.glob("*.json"),
@@ -104,6 +104,7 @@ def seal(directory, sources, timeout):
 
 def command(directory, arguments, log, timeout):
     started = time.monotonic()
+    timed_out = False
     with log.open("w") as stream:
         process = subprocess.Popen(arguments, cwd=directory,
             env=lean_environment(directory) if arguments[0] == "lean" else None,
@@ -113,31 +114,34 @@ def command(directory, arguments, log, timeout):
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-            return None
+            timed_out = True
     metrics = directory/"timings.json"
     times = json.loads(metrics.read_text()) if metrics.exists() else {}
     times[log.stem] = time.monotonic() - started
     metrics.write_text(json.dumps(times, indent=2)+"\n")
-    return process.returncode
+    return None if timed_out else process.returncode
 
 
 def build(directory, timeout, *, typed=False):
-    if not (directory/".lake/packages/veil/.lake/build/lib/lean/Veil/Base.olean").exists():
-        code = command(directory, ["lake", "--no-cache", "build"], directory/"build.log", timeout)
+    if not (directory/".lake/packages/veil/.lake/build/lib/lean/Veil.olean").exists():
+        code = command(directory, ["lake", "--no-cache", "build", "+Veil"], directory/"build.log", timeout)
         if code is None: raise subprocess.TimeoutExpired("Lean dependency build", timeout)
         if code: raise RuntimeError("Lean dependency build failed; see build.log")
     (directory/".lake/build/lib/lean").mkdir(parents=True, exist_ok=True)
-    for name, audits in (("Semantics", []), ("TypedSource", []), ("VeilAdapter", ["RMVerify.Reactive.veil_initial",
+    for name, audits in (("Semantics", []), ("TypedSource", []), ("Borrowing", []), ("Network", []), ("VeilAdapter", ["RMVerify.Reactive.veil_initial",
                           "RMVerify.Reactive.veil_round", "RMVerify.Reactive.veil_reachable"])):
-        if name == "TypedSource" and not typed: continue
+        if name in ("TypedSource", "Borrowing") and not typed: continue
         status, reason = run(directory, name, (directory/f"{name}.lean").read_text(), audits, timeout, output=True)
         if status == "unknown" and "timed out" in reason: raise subprocess.TimeoutExpired(reason, timeout)
         if status != "proved": raise RuntimeError(reason)
 
 
 def run(directory, name, source, audits, timeout, *, output=False):
+    if 'import Translation' in source or 'import Invariants' in source:
+        source = re.sub(r'(?m)^(\s*all_goals first \| omega \| grind[^\n]*\])(\)*)$',r'\1 | (try veil_smt; done)\2',source)
+        if 'veil_smt' in source:source = 'import Veil\n'+source.replace('set_option veil.smt.trust false','set_option veil.smt.trust false\nset_option veil.smt.timeout 5',1)
     (directory / f"{name}.lean").write_text(source)
-    arguments = ["lean", "-j1", f"{name}.lean"]
+    arguments = ["lean", "-j1", *solver_plugins(directory,source), f"{name}.lean"]
     if output:
         arguments += ["-o", str(directory / ".lake/build/lib/lean" / f"{name}.olean")]
     log = directory / f"{name}.log"
@@ -145,7 +149,7 @@ def run(directory, name, source, audits, timeout, *, output=False):
     if code is None: return "unknown", f"{name}: Lean timed out"
     text = log.read_text()
     if code:
-        status = "unknown" if re.search(r"unsolved goals|could not prove|tactic.*failed|`grind` failed|maximum|heartbeat", text) else "error"
+        status = "unknown" if re.search(r"unsolved goals|could not prove|tactic.*failed|`grind` failed|maximum|heartbeat|cannot translate|SMT|reconstruct", text) else "error"
         return status, f"{name}: Lean did not accept the obligation; see {log}"
     try:
         audit(text, audits)
@@ -252,7 +256,7 @@ def definitions(model):
                   f"def step{j} (s : State) {arguments(m['inputs'])} : State := decodeState (output{j} s {actuals(m['inputs'])})",
                   f"def result{j} (s : State) {arguments(m['inputs'])} : {kind(m['result'])} := " + decode(m['result'], f"environment (output{j} s {actuals(m['inputs'])}) {len(model['fields'])}")]
         names += [f"output{j}", f"step{j}", f"result{j}"]
-    lines += ["def model : Model State Action where", "  initial := decodeState (compiled0 (environment []))", "  step s action := match action with"]
+    lines += ["def model : Model State Action where", "  initial := decodeState (compiled0 (environment []))", "  step s selected := match selected with"]
     for j,m in enumerate(model["methods"]): lines.append(f"    | .m{j} {actuals(m['inputs'])} => step{j} s {actuals(m['inputs'])}")
     names.append("model")
     for i,p in enumerate(model["invariants"]):
@@ -307,14 +311,14 @@ def invariant_proof(model, names):
     lines = ["import Translation", "set_option veil.smt.trust false", "open RMVerify Verified", "set_option linter.all false", "set_option maxRecDepth 100000", "set_option maxHeartbeats 1000000",
              "theorem invariant : ∀ s, Reachable model s → safe s := by",
              "  apply invariant_of_induction", "  ·\n" + indent(tactic(names), "    "),
-             "  · intro s action hs", indent(state_cases(model, ["s"]), "    ")]
+             "  · intro s selected hs", indent(state_cases(model, ["s"]), "    ")]
     integers, domain = finite_state_hint(model)
     for i in integers:
         lines += ["    all_goals", "      try",
                   f"        have bounded : " + " ∨ ".join(f"s{i} = ({v} : Int)" for v in domain) + " := by",
                   indent(tactic(names), "          "),
                   "        rcases bounded with " + " | ".join("rfl" for _ in domain)]
-    lines += ["    all_goals", "      cases action with"]
+    lines += ["    all_goals", "      cases selected with"]
     for j, method in enumerate(model["methods"]):
         lines.append(f"      | m{j} {actuals(method['inputs'])} =>")
         booleans = [f"cases a{i}" for i,k in enumerate(method["inputs"]) if k == "bool"]
@@ -323,10 +327,10 @@ def invariant_proof(model, names):
                   "            simp_all +decide [safe" + "".join(f", inv{i}" for i in range(len(model["invariants"]))) + "]",
                   "          all_goals", indent(tactic(names), "            ")]
     lines += [
-             "theorem always_safe (states : Nat → State) (actions : Nat → Action)",
+             "theorem always_safe (states : Nat → State) (selections : Nat → Action)",
              "    (start : states 0 = model.initial)",
-             "    (round : ∀ n, states (n+1) = model.step (states n) (actions n)) :",
-             "    ∀ n, safe (states n) := invariant_always model safe invariant states actions start round",
+             "    (round : ∀ n, states (n+1) = model.step (states n) (selections n)) :",
+             "    ∀ n, safe (states n) := invariant_always model safe invariant states selections start round",
              "theorem source_invariant : ∀ s, Reachable sourceModel s → sourceSafe s := by",
              "  simpa only [source_model_eq, sourceSafe, safe, " + ", ".join(f"inv_agreement{i}" for i in range(len(model["invariants"]))) + "] using invariant" if model["invariants"] else "  simpa only [source_model_eq, sourceSafe, safe] using invariant",
              "theorem veil_invariant : ∀ s, model.toModule.toVeil.reachable () s → safe s := by",
@@ -410,7 +414,7 @@ def source_bridges(model):
                   f"theorem result_agreement{j} (s : State) {binders} : sourceResult{j} s {args} = result{j} s {args} := by simp [sourceResult{j}, result{j}, output_agreement{j}]"]
     lines += ["def sourceModel : Model State Action where",
               f"  initial := decodeState ((source0.exec (environment [])).outputs {field_count})",
-              "  step s action := match action with"]
+              "  step s selected := match selected with"]
     for j,m in enumerate(model["methods"]): lines.append(f"    | .m{j} {actuals(m['inputs'])} => sourceStep{j} s {actuals(m['inputs'])}")
     rewrite = ", ".join(["sourceModel","model","translation0 _ True.intro"]+[f"step_agreement{j}" for j in range(len(model["methods"]))])
     lines += ["theorem source_model_eq : sourceModel = model := by", f"  simp only [{rewrite}]", "#print axioms source_model_eq"]

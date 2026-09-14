@@ -195,7 +195,7 @@ def safe(s: Fresh) -> bool:
         report = json.loads(result.stdout)
         artifact = json.loads((Path(report['evidence'])/'artifact.json').read_text())
         self.assertTrue(artifact['sources'])
-        self.assertEqual(artifact['version'], 3)
+        self.assertEqual(artifact['version'], 4)
         self.assertNotIn('graphs', artifact)
         self.assertTrue(artifact['dependency_versions']['lean'])
         self.assertIn('source_model_eq',(Path(report['evidence'])/'Translation.lean').read_text())

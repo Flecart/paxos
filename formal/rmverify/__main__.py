@@ -3,7 +3,7 @@ import argparse
 from dataclasses import asdict
 import importlib
 import json
-from .value_types import json_value
+from .value_types import json_value, data
 
 from . import verify
 
@@ -19,7 +19,7 @@ def main():
     if not separator: parser.error("specify module:variable")
     spec = getattr(importlib.import_module(module),name)
     report = verify(spec,directory=args.out,timeout=args.timeout,depth=args.depth)
-    print(json.dumps(asdict(report),indent=2,default=json_value))
+    print(json.dumps(data(report),indent=2,default=json_value))
     raise SystemExit(0 if report.ok else 1)
 
 

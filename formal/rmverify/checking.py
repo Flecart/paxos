@@ -1,7 +1,7 @@
 """Verification orchestration: compilation is not success until Lean accepts it."""
 from dataclasses import asdict
 from copy import deepcopy
-from .value_types import mutable, matches, probes, json_value
+from .value_types import mutable, matches, probes, json_value, typed, record_types, default_value, data
 import hashlib
 import inspect
 import itertools
@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 
 from .api import Report
-from .frontend import Unsupported, annotation, fields_of, method_program, parameters, predicate_program
+from .frontend import Unsupported, annotation, fields_of, method_program, parameters, predicate_program, referenced_programs
 from .execution import execute, ExecutionFault
 from . import lean_backend as lean
 
@@ -51,6 +51,7 @@ def prepare_model(spec):
         model["contracts"].append(dict(method=j, requires=pre, ensures=post, identifier="contract:"+f.__qualname__))
     if not model["invariants"] and not model["contracts"]:
         raise Unsupported("specify at least one invariant or method contract")
+    model["programs"] = referenced_programs(model["programs"])
     return model
 
 
@@ -72,24 +73,32 @@ def python_program(model, index, values):
     if index == 0:
         obj = object.__new__(model["target"])
         try: program.function(obj)
-        except KeyError as error:
+        except (KeyError,AttributeError) as error:
             # Uninitialized slots cannot be read by accepted source. They use
             # the same internal defaults as the typed source frame after failure.
-            values = [getattr(obj,n, {} if k.startswith("dict[") else set() if k.startswith("set[") else False if k == "bool" else 0)
+            values = [getattr(obj,n, default_value(k))
                       for n,k in model["fields"].items()]
-            raise ExecutionFault(values) from error
+            raise ExecutionFault(values,"missingKey" if isinstance(error,KeyError) else "missingValue") from error
         return snapshot(model,obj) + [0]
     method = next((m for m in model["methods"] if m["index"] == index), None)
     if method is not None:
         obj = make_state(model,values[:len(model["fields"])])
         try: result = program.function(obj,*values[len(model["fields"]):])
-        except KeyError as error: raise ExecutionFault(snapshot(model,obj)) from error
-        expected = {"int":int,"bool":bool,"none":type(None)}[method["result"]]
-        if type(result) is not expected: raise ValueError("runtime return type mismatch")
-        return snapshot(model,obj) + [0 if result is None else result]
+        except (KeyError,AttributeError) as error: raise ExecutionFault(snapshot(model,obj),"missingKey" if isinstance(error,KeyError) else "missingValue") from error
+        if not matches(result,method["result"]): raise ValueError("runtime return type mismatch")
+        return snapshot(model,obj) + [0 if method["result"] == "none" else result]
+    if any(program.function is h.function for p in model["programs"] for h in (p.helpers or [])):
+        if program.fields:
+            obj=make_state(model,values[:program.fields])
+            try:result=program.function(obj,*values[program.fields:])
+            except (KeyError,AttributeError) as error:raise ExecutionFault(snapshot(model,obj),"missingKey" if isinstance(error,KeyError) else "missingValue") from error
+            return snapshot(model,obj)+[0 if program.result=="none" else result]
+        result = program.function(*values)
+        if not matches(result,program.result): raise ValueError("helper result type mismatch")
+        return [result]
     args, cursor = [], 0
     for p in parameters(program.function):
-        kind = annotation(p.annotation,model["target"])
+        kind = annotation(p.annotation,model["target"],program.function.__globals__)
         if kind == "state":
             args.append(make_state(model,values[cursor:cursor+len(model["fields"])]))
             cursor += len(model["fields"])
@@ -110,8 +119,9 @@ def differential(model):
         for values in itertools.islice(itertools.product(*cases),128):
             def outcome(run):
                 try: return ("ok", run())
-                except ExecutionFault as error: return ("fault", "missingKey", error.fields)
+                except ExecutionFault as error: return ("fault", error.reason, error.fields)
                 except KeyError: return ("fault", "missingKey", [])
+                except AttributeError: return ("fault", "missingValue", [])
             actual = outcome(lambda: execute(model["programs"][i],values))
             expected = outcome(lambda: python_program(model,i,values))
             if actual != expected: raise ValueError(f"translation mismatch in {p.name}: {values}: Python={expected}, RM={actual}")
@@ -134,14 +144,14 @@ def check_trace(model, trace):
         m = model["methods"][j]
         if set(call.arguments) != set(m["parameters"]): raise ValueError("trace argument names differ from method signature")
         args = [call.arguments[n] for n in m["parameters"]]
-        if any(type(v) is not (bool if k == "bool" else int) for v,k in zip(args,m["inputs"])):
+        if any(not matches(v,k) for v,k in zip(args,m["inputs"])):
             raise ValueError("trace argument type mismatch")
         before = make_state(model,state)
         result = m["function"](obj,*args)
-        if type(result) is not {"int":int,"bool":bool,"none":type(None)}[m["result"]]:
+        if not matches(result,m["result"]):
             raise ValueError("runtime return type mismatch")
         outputs = execute(model["programs"][m["index"]],state+args)
-        if snapshot(model,obj) != outputs[:-1] or (0 if result is None else result) != outputs[-1]:
+        if snapshot(model,obj) != outputs[:-1] or (0 if m["result"] == "none" else result) != outputs[-1]:
             raise ValueError("Python/RM trace mismatch")
         state = outputs[:-1]
         invariants()
@@ -157,6 +167,7 @@ def check_trace(model, trace):
 def provenance(programs, targets):
     source_paths = {Path(inspect.getsourcefile(target)) for target in targets}
     source_paths.update(Path(inspect.getsourcefile(p.function)) for p in programs)
+    source_paths.update(Path(inspect.getsourcefile(k.record)) for k in record_types([k for p in programs for k in [*p.slots,p.result]]))
     files = {str(p.resolve()):hashlib.sha256(p.read_bytes()).hexdigest() for p in source_paths}
     package = Path(__file__).parent
     paths = [*package.glob("*.py"), *package.glob("lean/*.lean"), *package.glob("lean/*.toml"),
@@ -164,7 +175,15 @@ def provenance(programs, targets):
     tools = {str(p.relative_to(package)):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
     import platform
     from importlib.metadata import version
-    return dict(sources=files, tooling=tools,
+    records = []
+    for k in record_types([k for p in programs for k in [*p.slots,p.result]]):
+        behavior = {}
+        for name in ('__init__','__eq__','__hash__','__getattribute__','__getattr__','__setattr__','__delattr__'):
+            member = getattr(k.record,name,None)
+            behavior[name] = function_id(member) if inspect.isfunction(member) else repr(member)
+        records.append(dict(name=str(k), fields=k.fields, behavior=behavior,
+                            annotations={n:repr(a) for n,a in inspect.get_annotations(k.record).items()}))
+    return dict(sources=files, tooling=tools, records=records,
                 dependency_versions={"lean": (package/"lean/lean-toolchain").read_text().strip(),
                                      "python": platform.python_version(), "z3-solver": version("z3-solver")})
 
@@ -191,14 +210,14 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
     evidence = Path(tempfile.mkdtemp(prefix="check-",dir=parent))
     report = Report("error",evidence=str(evidence))
     status_path = evidence / "report.json"
-    status_path.write_text(json.dumps(asdict(report),indent=2,default=json_value)+"\n")
+    status_path.write_text(json.dumps(data(report),indent=2,default=json_value)+"\n")
     try:
         model = prepare_model(spec)
         backend = lean
-        if any(mutable(k) for p in model["programs"] for k in p.slots):
+        if any(p.helpers or any(typed(k) for k in [*p.slots,p.result]) for p in model["programs"]):
             from . import typed_backend as backend
         provenance = identity(spec,model)
-        artifact = dict(**provenance,version=3,pipeline="Python → Lean RM definitions → checked theorem",fields=model["fields"],programs=[{k:v for k,v in vars(p).items() if k != "function"} for p in model["programs"]],
+        artifact = dict(**provenance,version=4,pipeline="Python → Lean RM definitions → checked theorem",fields=model["fields"],programs=[{k:v for k,v in vars(p).items() if k not in ("function","helpers")} for p in model["programs"]],
                         invariants=[{k:v for k,v in p.items() if k != "function"} for p in model["invariants"]],contracts=model["contracts"])
         artifact["sha256"] = hashlib.sha256(json.dumps(artifact,sort_keys=True,default=json_value).encode()).hexdigest()
         (evidence/"artifact.json").write_text(json.dumps(artifact,indent=2,default=json_value)+"\n")
@@ -224,6 +243,10 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
             for p in model["invariants"]: report.properties[p["identifier"]] = dict(status=inv_status)
             if backend is not lean: report.properties["no-fault"] = dict(status=inv_status)
             if reason: report.diagnostics.append(reason)
+            if backend is not lean and inv_status != "proved":
+                healthy,reason=lean.run(evidence,"NoFault",backend.no_fault_proof(model,names),["no_fault","source_no_fault"],timeout)
+                report.properties["no-fault"]=dict(status=healthy)
+                if reason:report.diagnostics.append(reason)
             for i,c in enumerate(model["contracts"]):
                 status, reason = lean.run(evidence,f"Contract{i}",backend.contract_proof(model,names,i,inv_status=="proved"),["contract","source_contract"],timeout)
                 report.properties[c["identifier"]] = dict(status=status)
@@ -231,6 +254,10 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
             unresolved = {key for key,value in report.properties.items() if value["status"] == "unknown"}
             for key in unresolved:
                 report.properties[key]["reason"] = "automatic proof did not close; consider additional strengthening predicates"
+            if unresolved.intersection(p["identifier"] for p in model["invariants"]):
+                from .symbolic import search
+                for query in search(evidence,model,names,composition=False,typed=backend is not lean,depth=depth,timeout=timeout):
+                    report.diagnostics.append(f"Veil {query['kind']}: {query['status']} (diagnostic only; {query['log']})")
             if unresolved and backend is lean:
                 from .solver import counterexamples
                 for identifier, witness in counterexamples(model,depth,timeout,unresolved).items():
@@ -242,7 +269,7 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
             if unresolved and backend is not lean:
                 for identifier,witness in backend.counterexamples(model,depth,unresolved).items():
                     name = "FaultWitness" if identifier == "no-fault" else "Witness" + str(list(report.properties).index(identifier))
-                    (evidence/f"{name}.json").write_text(json.dumps(witness,indent=2,default=json_value)+"\n")
+                    (evidence/f"{name}.json").write_text(json.dumps(data(witness),indent=2)+"\n")
                     status,reason = lean.run(evidence,name,backend.witness_proof(model,witness,names),["refutation","source_refutation"],timeout)
                     if status == "proved": report.properties[identifier] = dict(status="refuted",witness=witness)
                     elif reason: report.diagnostics.append(reason)
@@ -262,12 +289,12 @@ def verify(spec, *, directory=None, timeout=60, depth=10):
     except Exception as error:
         report.status = "error"
         report.diagnostics.append(f"{type(error).__name__}: {error}")
-    status_path.write_text(json.dumps(asdict(report),indent=2,default=json_value)+"\n")
+    status_path.write_text(json.dumps(data(report),indent=2,default=json_value)+"\n")
     if 'provenance' in locals() and (evidence/"recheck.py").exists():
         try: lean.seal(evidence, provenance["sources"], timeout)
         except (RuntimeError, OSError) as error:
             report.status = report.translation = "error"
             for property_ in report.properties.values(): property_["status"] = "unknown"
             report.diagnostics.append(str(error))
-            status_path.write_text(json.dumps(asdict(report),indent=2,default=json_value)+"\n")
+            status_path.write_text(json.dumps(data(report),indent=2,default=json_value)+"\n")
     return report

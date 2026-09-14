@@ -4,17 +4,36 @@ Only Lean correspondence and replay authorize proof/refutation statuses.
 """
 import operator
 from copy import deepcopy
-from .value_types import mutable
+from .value_types import mutable, default_value
 
 
 class ExecutionFault(KeyError):
-    def __init__(self, fields):
-        super().__init__("missingKey")
+    def __init__(self, fields, reason="missingKey"):
+        super().__init__(reason)
+        self.reason = reason
         self.fields = deepcopy(fields)
 
 
 def expression(e, env):
     match e:
+        case ("helper", helper, args): return execute(helper.program,[expression(a,env) for a in args])[0]
+        case ("coerce_none", k, a):
+            expression(a,env)
+            return 0 if k=="none" else None
+        case ("get_optional_default", _, a, b, c):
+            container=expression(a,env);key=expression(b,env)
+            expression(c,env)
+            return container.get(key)
+        case ("none", _): return None
+        case ("some", a): return expression(a,env)
+        case ("is_none", a): return expression(a,env) is None
+        case ("unwrap", a):
+            v = expression(a,env)
+            if v is None: raise AttributeError('None record access')
+            return v
+        case ("get_optional", _,a,b): return expression(a,env).get(expression(b,env))
+        case ("record", k, values, labels): return k.record(**dict(zip(labels,(expression(v,env) for v in values))))
+        case ("field", _,name,a): return getattr(expression(a,env),name)
         case ("lit" | "bool", n): return n
         case ("var" | "bound", i): return env[i]
         case ("empty", k): return {} if k.startswith("dict[") else set()
@@ -31,7 +50,9 @@ def expression(e, env):
         case ("get", a, b, c): return expression(a, env).get(expression(b, env), expression(c, env))
         case ("dict_set", a, b, c):
             result = dict(expression(a, env))
-            result[expression(b, env)] = expression(c, env)
+            key = expression(b, env)
+            value = expression(c, env)
+            result[key] = value
             return result
         case ("set_add" | "set_discard" as op, a, b):
             result = set(expression(a, env))
@@ -52,13 +73,25 @@ def expression(e, env):
 def execute(program, values, *, evaluate=expression, choose=lambda c,a,b: a if c else b):
     if len(values) != len(program.inputs):
         raise ValueError("source input arity mismatch")
-    env = deepcopy(list(values)) + [{} if k.startswith("dict[") else set() if k.startswith("set[") else False if k == "bool" else 0 for k in program.slots[len(values):]]
+    env = deepcopy(list(values)) + [default_value(k) for k in program.slots[len(values):]]
     def eval_at(value, env):
         try: return evaluate(value, env)
-        except KeyError as error:
-            raise ExecutionFault(env[:program.fields]) from error
+        except ExecutionFault as error:
+            raise ExecutionFault(env[:program.fields],error.reason) from error
+        except (KeyError,AttributeError) as error:
+            raise ExecutionFault(env[:program.fields], "missingKey" if isinstance(error,KeyError) else "missingValue") from error
     def go(stmt, env, next_):
         match stmt:
+            case ("invoke", helper, args, slot):
+                values=[eval_at(arg,env) for arg in args]
+                updated=list(env)
+                try: result=execute(helper.program,values)
+                except ExecutionFault as error:
+                    updated[:helper.program.fields]=error.fields
+                    raise ExecutionFault(updated[:program.fields],error.reason) from error
+                updated[:helper.program.fields]=result[:-1]
+                if slot is not None:updated[slot]=result[-1]
+                return next_(updated)
             case ("skip",): return next_(env)
             case ("assign", slot, value):
                 updated = list(env)
@@ -70,13 +103,16 @@ def execute(program, values, *, evaluate=expression, choose=lambda c,a,b: a if c
                     return go(yes if eval_at(condition, env) else no, env, next_)
                 return [choose(eval_at(condition, env), a, b)
                         for a,b in zip(go(yes, env, next_), go(no, env, next_), strict=True)]
-            case ("each", _, container, slot, body):
+            case ("each", _, container, slot, body, dead):
                 items = list(eval_at(container,env))
                 def loop(index, current):
                     if index == len(items): return next_(current)
                     updated = list(current)
                     updated[slot] = items[index]
-                    return go(body,updated,lambda e: loop(index+1,e))
+                    def resume(e):
+                        for n,k in dead: e[n] = default_value(k)
+                        return loop(index+1,e)
+                    return go(body,updated,resume)
                 return loop(0,env)
             case ("ret", value): return env[:program.fields] + [eval_at(value, env)]
         raise ValueError("invalid source statement")

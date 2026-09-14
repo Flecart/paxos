@@ -39,6 +39,12 @@ class Await:
     variable: str
 
 
+@dataclass(frozen=True)
+class Choice:
+    """Choose a member of a finite collection in the previous global state."""
+    domain: object
+
+
 @dataclass
 class Component:
     """One RM atom: locally owned Python state and finite action alternatives."""
@@ -48,6 +54,7 @@ class Component:
     inputs: dict = field(default_factory=dict)
     initial_inputs: dict = field(default_factory=dict)
     stutter: bool = True
+    ghost: bool = False
 
 
 @dataclass

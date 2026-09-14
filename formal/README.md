@@ -3,7 +3,8 @@
 `rmverify` checks a small typed Python fragment. Implementations remain ordinary
 Python; separate `Specification` and `Composition` objects select transitions,
 properties, strengthening, and component connections. The current direct pipeline
-supports the existing scalar examples and a first single-class collection subset. It does **not** verify
+supports scalars, immutable records/options, flat collections, inferred borrowing,
+and composed finite-choice delivery. It does **not** verify
 `paxos_lab/algorithm.py`.
 
 The old SSA/`zrth`/ordered-wire compiler and its Lean interpreter have been removed.
@@ -17,12 +18,17 @@ adapters; regression tests deliberately corrupt these adapters.
 
 ## Install and run
 
-Requirements: Python 3.12–3.13, uv, Git, elan, and Node/npm (for Veil's upstream widget build). No Rust, Torch, Maturin, or
+Requirements: Python 3.12–3.13, uv, Git, elan, Node/npm (Veil widgets),
+and clang with libc++ development headers (CVC5 proof reconstruction). No Rust, Torch, Maturin, or
 initialization of `formal/reactive-modules` is required.
 
 ```sh
 python3 formal/bootstrap.py
 formal/.venv/bin/python -m rmverify examples.counter_spec:spec
+formal/.venv/bin/python -m rmverify examples.registry_spec:spec --timeout 120
+formal/.venv/bin/python -m rmverify examples.delivery_spec:spec --timeout 180 --depth 4
+formal/.venv/bin/python -m rmverify examples.delivery_spec:broken --timeout 180 --depth 4
+formal/.venv/bin/python -m rmverify examples.tla_lock_spec:spec --timeout 180
 formal/.venv/bin/python -m rmverify examples.collections_spec:spec --timeout 60
 formal/.venv/bin/python -m rmverify examples.collections_spec:registry --timeout 60
 formal/.venv/bin/python -m rmverify examples.receiver_spec:receiver --timeout 60
@@ -55,6 +61,7 @@ with `python3 formal/counter.py -5 0 7 7 3 12`.
 | Old versus current-round inputs | String binding versus `Await(variable)` |
 | Correctness properties | Explicit Boolean predicates |
 | Strengthening | Optional predicates, proved together with the invariant |
+| Runtime environment choices | `Choice(domain)` over the previous state |
 | Constructor choices | Explicit finite domains; Boolean parameters default to both values |
 
 ```python
@@ -91,75 +98,54 @@ Integers are mathematical, unbounded integers. Conditions must be Boolean.
 Unsupported code, missing annotations, dynamic class behavior, and stale loaded
 functions are rejected. Field/parameter names are not reserved verification APIs.
 
-## Collection and borrowing checkpoint
+## Collections, borrowing, and delivery
 
-`examples/collections_spec.py` exercises a dictionary and a set, repeated
-registration, lookup immediately after insertion, and discard of an absent ID.
-The storage contract asserts that registration stores `7` and that overwriting
-an existing key does not increase the dictionary's length. The `registry`
-specification uses arbitrary integer payloads: it checks agreement between the
-key domain and ID set, preserves the first payload on duplicate registration,
-and checks that duplicate registration does not increase the count. It exercises
-an exclusive local borrow. Frozen message records and the network remain outside
-this checkpoint.
+Flat `dict[K,V]` and `set[T]` accept immutable supported values: integers,
+booleans, optional values, and plain frozen dataclasses. Mutable nesting, custom
+record behavior, arbitrary object graphs, inheritance, recursion, async execution,
+and general exception handling remain outside the supported fragment.
 
-The single-class frontend accepts flat `dict[K, V]` and `set[K]`, with `int` or
-`bool` keys/elements/values. It supports empty construction, membership, `len`,
-dictionary lookup/assignment, `get(key, default)`, and set `add`/`discard`.
-Single-generator `all`/`any` predicates are supported without filters. Plain
-`for key in dictionary` loops preserve insertion order; mutation of that dictionary
-while iterating is rejected. Ordinary executable set iteration is rejected.
-Set quantifiers must be total: potentially failing subscripts in their bodies
-are rejected. The Lean library proves that total Boolean quantifiers are invariant
-under permutation of the set's internal enumeration.
+Supported operations include literal/empty construction, membership, length,
+dictionary lookup/get/update, set add/discard, finite iteration, and pure
+single-generator `all`/`any`. Dictionary iteration preserves insertion order.
+Set quantifiers require checked totality/permutation proofs. Executable set loops
+require a checked commutation certificate; an observable-order loop is rejected
+by its Lean obligation. The certificate is sufficient, not a complete procedure
+for deciding order independence. Optional guards refine local types. Nonrecursive
+pure helpers and owner-mutating method helpers are supported.
 
-`TypedSource.lean` provides the typed source interpreter, ordered dictionary
-operations, set operations, and explicit outcomes. Generated typed frames hold
-collections directly rather than encoding them into integer slots. Variable
-projections/updates and the whitelist of builtin operations remain part of source
-extraction's trust boundary. Lean checks equality between interpreted source and
-the generated functions, including state changes and faults. Loop correspondence
-can pass even when invariant automation cannot close the safety proof; that
-property remains `unknown`.
+Collection aliases are inferred borrows lasting through their last use. Multiple
+shared reads or one exclusive mutable borrow are allowed. Conflicting accesses,
+mutation during iteration, escaping scoped borrows, and use after a local owned
+collection transfers to state are rejected. Mutable method inputs are shared
+read-only borrows. Mutable returns, state-to-state transfers, and borrow rebinding
+remain unsupported. Lean checks extracted access/loan and affine-use certificates;
+source extraction and the connection to Python heap behavior remain trusted.
 
-A failed lookup produces `missingKey` and preserves writes made before it failed.
-The generated machine retains that fault in an absorbing state. Every collection
-verification requires the separate `no-fault` property, including specifications
-that request only contracts. Concrete search can propose a `reachable_fault`
-witness; only a successful Lean replay permits a refutation. This search explores
-at most 256 concrete states with small scalar arguments. That limit never bounds
-the scope of a successful safety theorem. Collection search also proposes reachable invariant violations. Collection contract
-counterexample discovery is not implemented yet.
+Missing lookup and absent optional dereference retain prior writes and produce
+explicit faults. Every rich-value verification includes a no-fault obligation.
+In compositions, a faulted atom freezes its owned state while other atoms remain
+able to advance. Faults never remove an execution from reachability.
 
-Mutable aliases are checked conservatively without runtime annotations. A local
-alias of a collection is a borrow lasting through its last syntactic use. Multiple
-shared borrows or one exclusive borrow are accepted; conflicting reads/writes
-identify both source locations. Borrow creation inside branches/loops, borrow
-rebinding, mutable returns, state-to-state ownership transfers, and mutable method
-arguments are rejected. These are frontend checks, not a formalization of Python's
-whole heap or a complete Rust borrow checker. Accepted code still has ordinary
-Python aliasing behavior.
+`Choice(domain)` binds an input to a finite old-state dictionary/set, pure domain
+function, or literal tuple/list. Empty domains disable that alternative; stuttering
+or an unconditional action remains available. `Component(..., ghost=True,
+stutter=False)` declares one deterministic observer transition. Executable atoms
+cannot read its state. Generated Lean proofs establish projection and extension
+of executions through this observer.
 
-`examples/receiver_spec.py` adds a receiver core under arbitrary repeated IDs.
-It checks count/set consistency and that duplicate delivery does not increment
-its count. The broken receiver increments on every delivery; search discovers
-two deliveries of one ID and Lean checks the resulting reachable violation.
-This single-class example does not yet establish network no-fabrication.
+The examples progress from `collections_spec` and `receiver_spec` to
+`messages_spec` (records/options), `primitives_spec` (helpers, moves, shared inputs,
+set iteration), `registry_spec` (immutable payloads and exclusive borrowing), and
+`delivery_spec` (separate sender, network, receiver, and history observer).
+The network permits delay, drop, reordering, and repeated delivery. The broken
+receiver supplies a reachable duplicate-processing counterexample. No fairness,
+eventual delivery, crash/restart, or socket behavior is assumed.
 
-See the [step-by-step walkthrough](reports/collections-checkpoint.md) for the
-small examples, generated definitions, mutation tests, and remaining boundaries.
-
-Run the small end-to-end checks with:
-
-```sh
-formal/.venv/bin/python formal/test_collections.py -v
-```
-
-`Network.lean` separately proves old-state finite-choice facts and that a
-deterministic observer can be added to/projected away from complete RM rounds.
-These are **library primitives only**: `Choice(domain)` and ghost components are
-not connected to Python `Composition` yet. Collection-valued composition is
-explicitly rejected rather than sent through scalar wiring.
+The [research report](reports/full-pipeline.md) explains the architecture,
+proof boundaries, validation, and independent comparison with the pinned TLA+
+lock example. The older [collection checkpoint](reports/collections-checkpoint.md)
+is historical and describes the earlier delivery.
 
 ## RM and Veil semantics
 
@@ -181,13 +167,22 @@ Its invariant induction uses the same RM induction theorem as composition.
 to Veil's transition interface and proves initial, round, and reachable-state
 correspondence. Generated invariant theorems also cover that Veil representation.
 `veil.smt.trust` is explicitly false. The current automation uses Lean reduction,
-standard-library lemmas, `omega`, and `grind`; witness proposals currently use Z3.
-Veil SMT reconstruction and Veil symbolic trace discovery are not connected yet.
+standard-library lemmas, `omega`, and `grind`, then Veil SMT reconstruction.
+Veil induction and bounded-trace queries produce diagnostic models; Z3 and finite
+source execution also propose witnesses. Only a separate Lean replay refutes a
+claim. Unreconstructed solver results remain unknown.
 For small integer intervals suggested by property literals, automation may prove
 a bound from the induction hypothesis and enumerate those cases. A failed bound
 proof falls back to symbolic checking; guessed bounds never restrict executions.
 
 ## Results and evidence
+
+Run the complete regression suite (55 tests, including real Lean checks):
+
+```sh
+formal/.venv/bin/python -m unittest formal.test_rmverify formal.test_composition formal.test_paper formal.test_collections formal.test_values formal.test_primitives formal.test_delivery formal.test_reference formal.test_automation -v
+```
+
 
 ```sh
 formal/.venv/bin/python -m rmverify module:spec --out .rmverify --timeout 120 --depth 10
@@ -208,17 +203,19 @@ formal/.venv/bin/python formal/test_paper.py -v
 A failed inductive step is not a reachable counterexample. Composition witnesses
 use distinct `reachable_invariant` and `relation_mismatch` kinds. Relation
 equivalence ranges over all valuations, so a mismatch need not be reachable.
+For typed compositions, relation predicates describe fault-free endpoints; the
+separate no-fault invariant connects that relation to reachable executions.
 `peterson_stuck` retains proved safety while receiving a checked missing-round
 counterexample. Search depth bounds discovery only; successful invariants cover
 unbounded executions.
 
-Evidence version **3** contains:
+Evidence version **4** contains:
 
 - `artifact.json`: source/specification identity, extracted source semantics,
   field and atom metadata, dependency versions, and a content hash; no RM graph.
 - `sources/`: content-addressed copies of the actual Python source files.
 - `Translation.lean`: generated typed definitions and source correspondence.
-- `Semantics.lean`, `TypedSource.lean`, `Network.lean`, `VeilAdapter.lean`, and pinned
+- `Semantics.lean`, `TypedSource.lean`, `Borrowing.lean`, `Network.lean`, `VeilAdapter.lean`, and pinned
   Lake files: reusable semantics and the complete-round Veil adapter. Only the
   modules listed in `recheck.json` were compiled for that evidence bundle.
 - Property/witness `.lean` files and `.log` files, including final axiom audits.

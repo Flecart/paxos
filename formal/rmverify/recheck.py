@@ -28,18 +28,26 @@ def lean_environment(directory):
                 ELAN_TOOLCHAIN=(directory/"lean-toolchain").read_text().strip())
 
 
+def solver_plugins(directory, source):
+    if not any(tactic in source for tactic in ('veil_smt','veil_bmc')):return []
+    library=directory/'.lake/packages/cvc5/.lake/build/lib/libcvc5_cvc5.so'
+    if sys.platform=='darwin':library=library.with_suffix('.dylib')
+    if not library.exists():raise ValueError('build the pinned CVC5 shared library before running SMT reconstruction')
+    return ['--plugin='+str(library.resolve())]
+
+
 def main():
     directory = Path(__file__).resolve().parent
     manifest = json.loads((directory/'recheck.json').read_text())
     for name, digest in manifest['files'].items():
         if hashlib.sha256((directory/name).read_bytes()).hexdigest() != digest:
             raise ValueError(f"evidence content changed: {name}")
-    if not (directory/'.lake/packages/veil/.lake/build/lib/lean/Veil/Base.olean').exists():
-        subprocess.run(['lake', '--no-cache', 'build'], cwd=directory, check=True)
+    if not (directory/'.lake/packages/veil/.lake/build/lib/lean/Veil.olean').exists():
+        subprocess.run(['lake', '--no-cache', 'build', '+Veil'], cwd=directory, check=True)
     (directory/'.lake/build/lib/lean').mkdir(parents=True, exist_ok=True)
     for obligation in manifest['obligations']:
         name = obligation['name']
-        args = ['lean', '-j1', f'{name}.lean']
+        args = ['lean', '-j1', *solver_plugins(directory,(directory/f'{name}.lean').read_text()), f'{name}.lean']
         if obligation['output']:
             args += ['-o', str(directory/'.lake/build/lib/lean'/f'{name}.olean')]
         result = subprocess.run(args, cwd=directory, env=lean_environment(directory), capture_output=True, text=True,

@@ -124,12 +124,12 @@ structure Atom (State : Type) where
   step : State → State → Prop
 
 /-- Equality of a finite set of state coordinates. -/
-def AgreeOn (value : State → Nat → Int) (coordinates : List Nat) (s t : State) : Prop :=
+def AgreeOn (value : State → Nat → Value) (coordinates : List Nat) (s t : State) : Prop :=
   ∀ i ∈ coordinates, value s i = value t i
 
 /-- Reads cannot depend on undeclared old/new coordinates; initialization
     constrains only owned coordinates. -/
-def Atom.Respects (a : Atom State) (value : State → Nat → Int) : Prop :=
+def Atom.Respects (a : Atom State) (value : State → Nat → Value) : Prop :=
   (∀ s t, AgreeOn value a.controls s t → (a.initial s ↔ a.initial t)) ∧
   (∀ s s' t t', AgreeOn value (a.controls ++ a.reads) s s' →
     AgreeOn value (a.controls ++ a.awaits) t t' → (a.step s t ↔ a.step s' t'))

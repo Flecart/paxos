@@ -1,0 +1,76 @@
+{
+  "date": "2026-09-14",
+  "method": "Fresh evidence, cached dependencies, concurrent verification load; wall time includes library compilation and all checks. Lean byte counts are source text, not kernel proof objects.",
+  "baseline_commit": "cc60a01a3fccbf6d400c3a85f8061a2df82ddaf8",
+  "baseline": [
+    {
+      "specification": "examples.counter_spec:spec",
+      "status": "proved",
+      "translation": "proved",
+      "seconds": 10.300605336000444,
+      "lean_bytes": 18707,
+      "translation_bytes": 7329,
+      "evidence": "/tmp/rmverify-baseline/evidence/check-4u6q32rs",
+      "artifact_sha256": "765904905414bc8d29a2e07509d01f8787500cf0232f6fa835b78a02ab615ca7",
+      "lean_toolchain": "leanprover/lean4:v4.30.0"
+    },
+    {
+      "specification": "examples.peterson_v2:peterson",
+      "status": "proved",
+      "translation": "proved",
+      "seconds": 96.08002048299386,
+      "lean_bytes": 54106,
+      "translation_bytes": 40093,
+      "evidence": "/tmp/rmverify-baseline/evidence/compose-tkssk1i1",
+      "artifact_sha256": "d4a6bedc2698a471c5b1dc45ddde34da126ea57895d2384f17b456efecf06966",
+      "lean_toolchain": "leanprover/lean4:v4.30.0"
+    }
+  ],
+  "python": "3.13.9",
+  "current": [
+    {
+      "artifact_sha256": "ca26795643ea5785039b7bf87eda7a946cb8a01c213fd562bb301c6cbbd20ed6",
+      "lean_toolchain": "leanprover/lean4:v4.32.0",
+      "specification": "examples.counter_spec:spec",
+      "status": "proved",
+      "translation": "proved",
+      "seconds": 17.95964432600158,
+      "lean_bytes": 42683,
+      "translation_bytes": 8867,
+      "evidence": "/home/angeloh/Desktop/work/paxos/formal/.rmverify/full-measurements/evidence/check-rahbr4nv"
+    },
+    {
+      "artifact_sha256": "3d33d445b62f4e86767874e86a8807911b263e1a1a9dcd0a003f749f845156df",
+      "lean_toolchain": "leanprover/lean4:v4.32.0",
+      "specification": "examples.peterson_v2:peterson",
+      "status": "proved",
+      "translation": "proved",
+      "seconds": 77.48359308599902,
+      "lean_bytes": 77144,
+      "translation_bytes": 40490,
+      "evidence": "/home/angeloh/Desktop/work/paxos/formal/.rmverify/full-measurements/evidence/compose-cczddq3h"
+    },
+    {
+      "artifact_sha256": "564c077065b226e8f3ba997089a945dd7a7eeb2d4404f8b7d899a30e6acf0ef6",
+      "lean_toolchain": "leanprover/lean4:v4.32.0",
+      "specification": "examples.registry_spec:spec",
+      "status": "proved",
+      "translation": "proved",
+      "seconds": 145.5387829020001,
+      "lean_bytes": 63614,
+      "translation_bytes": 26326,
+      "evidence": "/home/angeloh/Desktop/work/paxos/formal/.rmverify/full-measurements/evidence/check-j8er_r5c"
+    },
+    {
+      "artifact_sha256": "cda12b8fafc8d2e08a13d8a0554abba805277c9eab49f8c18b28ca8205838dba",
+      "lean_toolchain": "leanprover/lean4:v4.32.0",
+      "specification": "examples.delivery_spec:spec",
+      "status": "proved",
+      "translation": "proved",
+      "seconds": 163.21238362400072,
+      "lean_bytes": 179823,
+      "translation_bytes": 141941,
+      "evidence": "/home/angeloh/Desktop/work/paxos/formal/.rmverify/full-measurements/evidence/compose-b2na6mwq"
+    }
+  ]
+}
