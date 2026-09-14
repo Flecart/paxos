@@ -29,6 +29,8 @@ formal/.venv/bin/python -m rmverify examples.registry_spec:spec --timeout 120
 formal/.venv/bin/python -m rmverify examples.delivery_spec:spec --timeout 180 --depth 4
 formal/.venv/bin/python -m rmverify examples.delivery_spec:broken --timeout 180 --depth 4
 formal/.venv/bin/python -m rmverify examples.tla_lock_spec:spec --timeout 180
+formal/.venv/bin/python -m rmverify examples.paxos_model_spec:acceptor --timeout 120 --depth 2
+formal/.venv/bin/python -m rmverify examples.paxos_model_spec:spec --timeout 180 --depth 2
 formal/.venv/bin/python -m rmverify examples.collections_spec:spec --timeout 60
 formal/.venv/bin/python -m rmverify examples.collections_spec:registry --timeout 60
 formal/.venv/bin/python -m rmverify examples.receiver_spec:receiver --timeout 60
@@ -177,10 +179,11 @@ proof falls back to symbolic checking; guessed bounds never restrict executions.
 
 ## Results and evidence
 
-Run the complete regression suite (55 tests, including real Lean checks):
+Run the complete regression suite (64 tests, including real Lean checks and
+the separate Paxos model's explicit unknown-result checks):
 
 ```sh
-formal/.venv/bin/python -m unittest formal.test_rmverify formal.test_composition formal.test_paper formal.test_collections formal.test_values formal.test_primitives formal.test_delivery formal.test_reference formal.test_automation -v
+formal/.venv/bin/python -m unittest formal.test_rmverify formal.test_composition formal.test_paper formal.test_collections formal.test_values formal.test_primitives formal.test_delivery formal.test_reference formal.test_automation formal.test_paxos_model -v
 ```
 
 
@@ -255,10 +258,31 @@ formal/.venv/bin/python formal/paper_report.py
 formal/.venv/bin/python formal/composition_report.py
 ```
 
-The requested Paxos preparation is **not complete**. Frozen dataclass records,
-optional messages, general typed helpers, nonempty collection literals, full
-ownership transfer, collection-valued composition, Python `Choice(domain)` and
-ghost bindings, the frozen-message registry, and the duplicate-safe network proofs remain. General
-loop/invariant proof automation is also incomplete; adding syntax does not make
-its safety properties automatically provable. The network lemmas above establish
-useful foundations, not verification of a Python network or Paxos.
+## Separate Paxos safety model
+
+[`examples/paxos_model.py`](examples/paxos_model.py) defines **PaxosSafetyModel**,
+a synchronous single-decree model with three acceptors, two-member quorums,
+unbounded nonnegative ballots, and integer values. It is separate from
+`paxos_lab.algorithm.PaxosNode`; there is no refinement claim connecting them.
+[`examples/paxos_model_spec.py`](examples/paxos_model_spec.py) supplies an
+independent local-acceptor specification and a global agreement specification.
+
+The four protocol phases follow the pinned `Paxos.tla` message-history approach:
+only previously sent messages can be received, receipt can repeat or be delayed
+forever, and one protocol action executes per step. Phase 2a adopts the value
+with the highest accepted ballot reported by a prepare quorum and issues at
+most one value per ballot. A learner records values supported by two distinct
+acceptors' historical votes. Agreement means `len(chosen) <= 1` across all ballots.
+This model does not use independently advancing `Composition` atoms or a
+separate `Choice`/`Await` network; those remain demonstrated by `delivery_spec`.
+
+Run its regression checks with:
+
+```sh
+formal/.venv/bin/python -m unittest formal.test_paxos_model -v
+```
+
+Local acceptor safety and global Paxos agreement are separate proof obligations.
+The [Paxos model notes](reports/paxos-model.md) record the actual results and
+remaining proof work. No fairness, eventual decision, crash recovery, socket
+behavior, general quorum families, or checked TLA+ refinement is claimed.

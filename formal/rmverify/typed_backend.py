@@ -21,6 +21,13 @@ def arguments(kinds):
     return " ".join(f"(a{i} : {kind(k)})" for i,k in enumerate(kinds))
 
 
+def packed_type(kinds):
+    """Type the argument tuple before Lean elaborates nested helper calls."""
+    if not kinds: return "Int"  # The zero-argument expression uses a dummy 0.
+    if len(kinds) == 1: return kind(kinds[0])
+    return f"({kind(kinds[0])} × {packed_type(kinds[1:])})"
+
+
 def default(k):
     if optional(k): return "none"
     if record(k): return "⟨" + ", ".join(default(a) for a in k.fields.values()) + "⟩"
@@ -86,6 +93,9 @@ def total_expression(e, frame="f", depth=0):
         case ("none",k):return f"(none : Option ({kind(k)}))"
         case ("empty",k):return f"([] : {kind(k)})"
         case ("helper",_,_) | ("lookup",_,_) | ("unwrap",_):return None
+        # Keep tuple operands in typed Except bindings. Eager polymorphic
+        # constructor applications can make Lean infer the operands as types.
+        case ("pair",_,_):return None
         case ("bin","and" | "or" as op,a,b):
             av,bv=total_expression(a,frame,depth+1),total_expression(b,frame,depth+1)
             if av is not None and bv is not None:return f"({av} {'&&' if op=='and' else '||'} {bv})"
@@ -139,7 +149,7 @@ def expression(e, *, source, frame="f"):
             projections = ['a'+'.2'*i+('.1' if i<len(args)-1 else '') for i in range(len(args))]
             frame_value_ = source_frame_value(p,projections)
             callee = f"«source:{helper}».exec" if source else f"«compiled:{helper}»"
-            op = f"fun a => ({callee} ({frame_value_})).toExcept ({default(p.result)})"
+            op = f"fun (a : {packed_type(p.inputs)}) => ({callee} ({frame_value_})).toExcept ({default(p.result)})"
             arg = expression(packed(args) if args else ("lit",0),source=source,frame=frame)
             return f"(.call₁ ({op}) {arg})" if source else f"({arg} >>= ({op}))"
         case ("var", n): return f"(.read (fun f => f.v{n}))" if source else f"(.ok {frame}.v{n})"
@@ -163,7 +173,7 @@ def invocation(helper,args,slot,source):
     frame=source_frame_value(p,projections)
     # The frame argument type is inferred from the named helper function.
     callee=f"«source:{helper}».exec" if source else f"«compiled:{helper}»"
-    op=f"fun a => Except.ok ({frame})"
+    op=f"fun (a : {packed_type(p.inputs)}) => Except.ok ({frame})"
     arg=expression(pack(args),source=source)
     arg=f"(.call₁ ({op}) {arg})" if source else f"({arg} >>= ({op}))"
     merge="fun f c => {f with "+", ".join(f"v{n} := c.v{n}" for n in range(p.fields))+"}"
@@ -319,6 +329,7 @@ def program_definitions(model):
     for k in record_types([k for p in model["programs"] for k in [*p.slots,p.result]]):
         lines += [f"structure {kind(k)} where"] + [f"  «{n}» : {kind(a)}" for n,a in k.fields.items()] + ["  deriving Repr, DecidableEq"]
     names, aliased = [], set()
+    indices = {p.function: i for i,p in enumerate(model["programs"])}
     for i in definition_order(model["programs"]):
         p = model["programs"][i]
         lines += [f"structure Frame{i} where"] + [f"  v{n} : {kind(k)}" for n,k in enumerate(p.slots)] + ["  deriving Repr, DecidableEq"]
@@ -332,7 +343,13 @@ def program_definitions(model):
         lines += [f"theorem translation{i} (f : Frame{i}) : source{i}.exec f = compiled{i} f := by"]
         for n,k in enumerate(p.inputs):
             if optional(k):lines += [f"  all_goals cases h{n} : f.v{n}"]
-        lines += ["  all_goals",indent(tactic([f"source{i}",*reductions] + names),"    "), f"#print axioms translation{i}"]
+        # Reuse checked helper correspondence instead of expanding both helper
+        # bodies at every call. The caller's own source and code remain checked.
+        support = []
+        for helper in p.helpers or []:
+            name = helper.function.__module__+'.'+helper.function.__qualname__
+            support += [f"«source:{name}»", f"«compiled:{name}»", f"translation{indices[helper.function]}"]
+        lines += ["  all_goals",indent(tactic([f"source{i}",*reductions] + support),"    "), f"#print axioms translation{i}"]
         helper_name = p.function.__module__+'.'+p.function.__qualname__
         if helper_name not in aliased:
             lines += [f"def «source:{helper_name}» := source{i}", f"def «compiled:{helper_name}» := compiled{i}"]
