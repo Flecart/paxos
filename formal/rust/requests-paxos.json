@@ -1,0 +1,4 @@
+{
+  "profile": "paxos",
+  "claims": ["safety", "liveness"]
+}

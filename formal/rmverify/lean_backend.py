@@ -71,7 +71,7 @@ def tactic(names, *, contextual=True):
 
 def prepare(directory):
     library = SEMANTICS.parent
-    for name in ("Semantics.lean", "TypedSource.lean", "Borrowing.lean", "Network.lean", "VeilAdapter.lean", "lean-toolchain", "lakefile.toml", "lake-manifest.json"):
+    for name in ("Semantics.lean", "TypedSource.lean", "Borrowing.lean", "Network.lean", "VeilAdapter.lean", "Temporal.lean", "Paxos.lean", "lean-toolchain", "lakefile.toml", "lake-manifest.json"):
         shutil.copyfile(library/name, directory/name)
     shutil.copyfile(Path(__file__).with_name("recheck.py"), directory/"recheck.py")
     # Reuse installed dependencies locally. The manifest still supports fresh

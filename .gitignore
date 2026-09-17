@@ -6,3 +6,8 @@ __pycache__/
 
 # Rebuilt from the pinned Lean manifest.
 .lake/
+
+# Rust compilation and extraction intermediates.
+formal/rust/**/target/
+formal/rust/**/proofs/lean/llbc/
+formal/rust/paxos/proofs/

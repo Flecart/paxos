@@ -1,5 +1,13 @@
 # rmverify: Python → Lean RM definitions → checked theorem
 
+Design reference: [minimum usable verification pipeline](reports/verification-pipeline-design.md)
+records the intended architecture, proof boundaries, tooling, and first usability milestone.
+
+The [Rust-to-Lean pipeline](rust/README.md) accepts `(crate / .rs / ZIP, statements.json)`
+and includes implementation-backed safety and conditional-liveness proofs for a
+three-acceptor Rust Paxos core. Run `python3 formal/rust_verify.py formal/rust/paxos formal/rust/requests-paxos.json`.
+The Python workflow documented below remains supported.
+
 `rmverify` checks a small typed Python fragment. Implementations remain ordinary
 Python; separate `Specification` and `Composition` objects select transitions,
 properties, strengthening, and component connections. The current direct pipeline
