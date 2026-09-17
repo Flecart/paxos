@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "title": "Single-decree Paxos",
+  "description": "Three non-Byzantine acceptors; authenticated retained messages, globally unique ballots, serialized owned state. Protocol core, excluding transport and recovery.",
+  "imports": ["UserVerification.Protocol"],
+  "support": ["Paxos"],
+  "system": {
+    "module": "PaxosBridge.module",
+    "assumptions": ["PaxosBridge.StableFairQuorum"]
+  },
+  "claims": [
+    {"name": "agreement", "kind": "invariant", "predicate": "PaxosBridge.Agreement", "proof": "PaxosBridge.safety"},
+    {"name": "local_progress", "kind": "lean", "statement": "PaxosBridge.LocalProgress", "proof": "PaxosBridge.local_progress"},
+    {"name": "eventual_choice", "kind": "eventually", "predicate": "PaxosBridge.Decided", "proof": "PaxosBridge.eventually_decided"},
+    {"name": "refinement", "kind": "lean", "statement": "∀ s t, PaxosBridge.Step s t → RMVerify.Paxos.Step s t", "proof": "fun _ _ h => PaxosBridge.step_refines h"}
+  ]
+}

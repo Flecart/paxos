@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "title": "Pedersen commitments over an abstract group backend",
+  "description": "Parametric scheme proof. Backend operations must refine a scalar-field module; hiding requires fresh uniform blinding and a generator H. Binding is a reduction with an explicit discrete-log probability bound. Probabilities use finite uniform random tapes. No concrete curve, RNG, setup, constant-time, or asymptotic complexity proof.",
+  "imports": [
+    "UserVerification.Security"
+  ],
+  "claims": [
+    {
+      "name": "refinement",
+      "kind": "lean",
+      "description": "The extracted Rust commitment computes m • G + r • H under explicit backend laws.",
+      "statement": "∀ (F G : Type) [Field F] [AddCommGroup G] [Module F G] [DecidableEq G] (ops : verified_pedersen.Group G F), Pedersen.BackendLaws ops → ∀ (g h : G) (m r : F), verified_pedersen.commit ops g h m r = Aeneas.Std.RustM.ok (Pedersen.commit g h m r)",
+      "proof": "by intros; apply Pedersen.commit_refines; assumption"
+    },
+    {
+      "name": "correctness",
+      "kind": "lean",
+      "description": "An honest opening is accepted by the extracted Rust verifier.",
+      "statement": "∀ (F G : Type) [Field F] [AddCommGroup G] [Module F G] [DecidableEq G] (ops : verified_pedersen.Group G F), Pedersen.BackendLaws ops → ∀ (g h : G) (m r : F), verified_pedersen.verify ops g h m r (Pedersen.commit g h m r) = Aeneas.Std.RustM.ok true",
+      "proof": "by intros; apply Pedersen.correctness_refines; assumption"
+    },
+    {
+      "name": "perfect_hiding",
+      "kind": "lean",
+      "description": "Uniform fresh blinding yields exactly equal commitment distributions for any two messages; H spans the group.",
+      "statement": "∀ (F G : Type) [Field F] [AddCommGroup G] [Module F G] [Fintype F] [DecidableEq G] (ops : verified_pedersen.Group G F), Pedersen.BackendLaws ops → ∀ (g h : G), Function.Surjective (fun r : F => r • h) → ∀ (m₀ m₁ : F) (c : G), Pedersen.probability (fun r : F => verified_pedersen.commit ops g h m₀ r = Aeneas.Std.RustM.ok c) = Pedersen.probability (fun r : F => verified_pedersen.commit ops g h m₁ r = Aeneas.Std.RustM.ok c)",
+      "proof": "by intros; apply Pedersen.rust_perfect_hiding <;> assumption"
+    },
+    {
+      "name": "binding_reduction",
+      "kind": "lean",
+      "description": "Two accepted openings for distinct messages give the discrete logarithm of H to base G.",
+      "statement": "∀ (F G : Type) [Field F] [AddCommGroup G] [Module F G] [DecidableEq G] (ops : verified_pedersen.Group G F), Pedersen.BackendLaws ops → ∀ (g h : G), Function.Injective (fun x : F => x • g) → ∀ (o : Pedersen.Opening F), Pedersen.RustBindingWin ops g h o → Pedersen.extractLog o • g = h",
+      "proof": "by intros; apply Pedersen.rust_binding_reduction <;> assumption"
+    },
+    {
+      "name": "binding_bound",
+      "kind": "lean",
+      "description": "The binding-break probability is bounded by the supplied discrete-log success bound for the explicit reduction, including randomized challenges.",
+      "statement": "∀ (F G : Type) [Field F] [AddCommGroup G] [Module F G] [DecidableEq G] (ops : verified_pedersen.Group G F), Pedersen.BackendLaws ops → ∀ (Ω : Type) [Fintype Ω] [Nonempty Ω] (g : G), Function.Injective (fun x : F => x • g) → ∀ (challenge : Ω → G) (attack : Ω → Pedersen.Opening F) (ε : ℚ), Pedersen.probability (fun ω => Pedersen.extractLog (attack ω) • g = challenge ω) ≤ ε → Pedersen.probability (fun ω => Pedersen.RustBindingWin ops g (challenge ω) (attack ω)) ≤ ε",
+      "proof": "by intros; apply Pedersen.rust_binding_bound <;> assumption"
+    }
+  ]
+}

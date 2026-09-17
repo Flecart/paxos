@@ -21,6 +21,11 @@ import tomllib
 import urllib.request
 import zipfile
 
+if __package__:
+    from .rust_spec import compile_request, explain_request
+else:
+    from rust_spec import compile_request, explain_request
+
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / '.rmverify/rust-tools'
 HAX = TOOLS / 'cargo-hax'
@@ -47,7 +52,7 @@ def digest(path):
 
 def environment():
     return dict(os.environ, XDG_CACHE_HOME=str(TOOLS / 'cache'),
-                LEAN_NUM_THREADS='2', ELAN_TOOLCHAIN=LEAN)
+                LEAN_NUM_THREADS='2', ELAN_TOOLCHAIN=LEAN, RUSTUP_TOOLCHAIN=RUST)
 
 
 def run(command, cwd, log, timeout):
@@ -59,9 +64,11 @@ def run(command, cwd, log, timeout):
                                    start_new_session=True)
         try:
             code = process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+            if isinstance(error, KeyboardInterrupt):
+                raise
             raise TimeoutError(f'timed out after {timeout}s; see {log}')
     return code
 
@@ -160,32 +167,38 @@ def audit(text, names):
 
 
 def load_request(path):
-    request = json.loads(Path(path).read_text())
-    if not isinstance(request, dict) or not isinstance(request.get('claims'), list) or not request['claims']:
-        raise ValueError('statements must contain a nonempty claims list')
-    if request.get('profile') == 'paxos':
-        if any(c not in ('safety', 'liveness') for c in request['claims']):
-            raise ValueError('Paxos profile supports safety and liveness')
-    elif 'profile' in request:
-        raise ValueError('unknown verification profile')
-    else:
-        for claim in request['claims']:
-            if not isinstance(claim, dict) or not isinstance(claim.get('statement'), str):
-                raise ValueError('each custom claim needs an explicit Lean statement')
-            if not isinstance(claim.get('name'), str) or not IDENTIFIER.fullmatch(claim['name']):
-                raise ValueError('claim name must be a Lean identifier')
-            for key in ('proof', 'refutation'):
-                if key in claim and not isinstance(claim[key], str):
-                    raise ValueError(f'{key} must be Lean source text')
-        if not isinstance(request.get('imports', []), list):
-            raise ValueError('imports must be a list of Lean module names')
-        for name in request.get('imports', []):
-            if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
-                raise ValueError('imports must be Lean module names')
-    names = [c if isinstance(c, str) else c['name'] for c in request['claims']]
-    if len(set(names)) != len(names):
-        raise ValueError('duplicate claim names')
+    path = Path(path)
+    try:
+        request = tomllib.loads(path.read_text()) if path.suffix == '.toml' else json.loads(path.read_text())
+    except (ValueError, OSError) as error:
+        raise ValueError(f'{path}: {error}') from error
+    if isinstance(request, dict) and 'profile' in request:
+        if set(request) != {'profile', 'claims'}:
+            raise ValueError('a named profile accepts only profile and claims')
+        profile = request['profile']
+        if not isinstance(profile, str) or not IDENTIFIER.fullmatch(profile):
+            raise ValueError('invalid profile name')
+        path = ROOT / 'formal/rust/profiles' / (profile + '.json')
+        if not path.is_file():
+            raise ValueError('unknown verification profile')
+        template = json.loads(path.read_text())
+        names = request['claims']
+        available = {c['name']: c for c in template['claims']}
+        if not isinstance(names, list) or not names or any(not isinstance(n, str) or n not in available for n in names):
+            raise ValueError('unknown or empty profile claims')
+        request = {**template, 'claims': [available[n] for n in names]}
+    compile_request(request)
     return request
+
+
+def discover_spec(source):
+    source = Path(source)
+    if not source.is_dir():
+        raise ValueError('For a .rs or ZIP input, supply the spec.json or spec.toml path explicitly.')
+    candidates = [source / name for name in ('spec.toml', 'spec.json') if (source / name).is_file()]
+    if len(candidates) != 1:
+        raise ValueError('Expected one spec.toml or spec.json in the crate; supply a spec path explicitly if both exist.')
+    return candidates[0]
 
 
 def source_hashes(directory):
@@ -205,10 +218,17 @@ def verify(source, request_path, out, timeout=300):
                   'runtime conforms to the explicit event/ownership/network interface'],
               'scope': 'protocol library; not sockets, executable transport, or crash recovery'}
     try:
+        request_path = request_path or discover_spec(source)
         request = load_request(request_path)
-        report['properties'] = {(c if isinstance(c, str) else c['name']): {'status': 'not-run'}
-                                for c in request['claims']}
-        (evidence / 'statements.json').write_text(json.dumps(request, indent=2) + '\n')
+        specification = compile_request(request)
+        report['properties'] = {c['name']: {'status': 'not-run', 'statement': c['statement'],
+            'kind': c['kind'], 'description': c.get('description', ''),
+            'assumptions': c['assumptions']} for c in specification['claims']}
+        report['title'] = request.get('title', '')
+        report['description'] = request.get('description', '')
+        (evidence / 'statements.json').write_text(json.dumps(request, indent=2, ensure_ascii=False) + '\n')
+        shutil.copyfile(request_path, evidence / 'input-request.json')
+        (evidence / 'elaborated.json').write_text(json.dumps(specification, indent=2, ensure_ascii=False) + '\n')
         crate = unpack(source, evidence / 'source')
         cargo = tomllib.loads((crate / 'Cargo.toml').read_text())
         library_path = cargo.get('lib', {}).get('path', 'src/lib.rs')
@@ -244,6 +264,7 @@ def verify(source, request_path, out, timeout=300):
             report.update(status='unsupported', translation='failed')
             report['diagnostics'].append('Rust extraction failed; see extraction.log')
             return report
+        report['translation'] = 'extracted'
         project = crate / 'proofs/lean'
         roots = list(project.glob('*.lean'))
         if len(roots) != 1:
@@ -256,32 +277,17 @@ def verify(source, request_path, out, timeout=300):
         (project / '.lake/packages').symlink_to(packages, target_is_directory=True)
         lock = json.loads((ROOT / 'formal/rust/lean-lake-manifest.json').read_text())
         lock['name'] = lib
-        (project / 'lake-manifest.json').write_text(json.dumps(lock, indent=2) + '\n')
-        if request.get('profile') == 'paxos':
-            if lib != 'VerifiedPaxos':
-                raise ValueError('Paxos profile expects the verified-paxos library API')
-            for name in ('Semantics', 'Temporal', 'Paxos'):
-                shutil.copyfile(ROOT / f'formal/rmverify/lean/{name}.lean', project / f'{name}.lean')
-            shutil.copyfile(ROOT / 'formal/rust/PaxosBridge.lean', project / 'PaxosBridge.lean')
-            report['descriptions'] = {
-                'safety': 'all successful learner certificates agree in every reachable state',
-                'liveness': 'enabled local handlers return successfully; a stable fair quorum eventually chooses'}
-            report['assumptions'] = {
-                'safety': ['three non-Byzantine acceptors; two distinct members per quorum',
-                    'authenticated retained messages; globally unique proposer ballots',
-                    'serialized owned state; no unmodeled reset or corruption'],
-                'liveness': ['positive u64 ballot; stable responsive quorum from some time',
-                    'weak fairness of its prepare, propose, and accept actions',
-                    'quorum promises never exceed that ballot after stabilization']}
+        (project / 'lake-manifest.json').write_text(json.dumps(lock, indent=2, ensure_ascii=False) + '\n')
+        support = list(dict.fromkeys(['Semantics', 'Temporal', 'Specification', *specification['support']]))
+        for name in support:
+            origin = ROOT / 'formal/rmverify/lean' / (name + '.lean')
+            if not origin.is_file():
+                raise ValueError(f'unknown shared support module: {name}')
+            shutil.copyfile(origin, project / (name + '.lean'))
             with (project / 'lakefile.toml').open('a') as config:
-                for name in ('Semantics', 'Temporal', 'Paxos', 'PaxosBridge'):
-                    config.write(f'\n[[lean_lib]]\nname = \"{name}\"\n')
-            imports = ['PaxosBridge']
-            claims = [{'name': c, 'statement': f'PaxosBridge.{c.capitalize()}Claim',
-                       'proof': f'PaxosBridge.{c}'} for c in request['claims']]
-        else:
-            imports = [f'{lib}.Extraction', *request.get('imports', [])]
-            claims = request['claims']
+                config.write(f'\n[[lean_lib]]\nname = "{name}"\n')
+        imports = [f'{lib}.Extraction', 'Specification', *specification['imports']]
+        claims = specification['claims']
         handwritten = crate / 'verification'
         if handwritten.is_dir():
             shutil.copytree(handwritten, project / 'UserVerification')
@@ -291,17 +297,45 @@ def verify(source, request_path, out, timeout=300):
         root = roots[0]
         root.write_text('\n'.join('import ' + i for i in imports) + '\n')
         print('Building extracted definitions and proof dependencies', file=sys.stderr)
-        if run(['lake', 'build'], project, evidence / 'build.log', timeout):
-            report.update(status='unknown', translation='extracted')
-            for result in report['properties'].values():
-                result['status'] = 'unknown'
-            report['diagnostics'].append('Lean compilation/refinement failed; see build.log')
-            return report
+        # Build the Rust definitions before independent handwritten models. This
+        # avoids loading several large Lean environments concurrently on laptops.
+        for targets, filename in (([f'+{lib}.Extraction'], 'extracted-build.log'), ([], 'build.log')):
+            if run(['lake', 'build', *targets], project, evidence / filename, timeout):
+                report.update(status='unknown', translation='extracted')
+                for result in report['properties'].values():
+                    result['status'] = 'unknown'
+                report['diagnostics'].append(f'Lean compilation/refinement failed; see {filename}')
+                report['diagnostics'].extend(line for line in (evidence / filename).read_text().splitlines()
+                                             if line.startswith('error: ') and not line.startswith('error: Lean exited'))
+                return report
         report['translation'] = 'extracted'
         audited = []
+        # The common case checks all claims in one Lean process. Fall back to
+        # individual checks to preserve useful partial results on any failure.
+        batch_file = project / 'Requests.lean'
+        batch_log = evidence / 'Requests.log'
+        batch = '\n'.join('import ' + i for i in imports) + '\nset_option maxHeartbeats 1000000\n'
+        names = []
+        for index, claim in enumerate(claims):
+            theorem = f'VerifiedRequest.claim{index}'
+            names.append(theorem)
+            proof = claim.get('proof', 'by first | rfl | simp_all | omega | grind')
+            batch += f'\ntheorem {theorem} : {claim["statement"]} :=\n{proof}\n#print axioms {theorem}\n'
+        batch_file.write_text(batch)
+        batch_ok = False
+        try:
+            if run(['lake', 'env', 'lean', batch_file.name], project, batch_log, timeout) == 0:
+                audit(batch_log.read_text(), names)
+                batch_ok = True
+        except (TimeoutError, ValueError):
+            pass
         for index, claim in enumerate(claims):
             module = f'Request{index}'
             theorem = f'VerifiedRequest.claim{index}'
+            if batch_ok:
+                report['properties'][claim['name']].update(status='proved', theorem=theorem, log=str(batch_log))
+                audited.append({'file': batch_file.name, 'theorem': theorem})
+                continue
             proof = claim.get('proof', 'by first | rfl | simp_all | omega | grind')
             content = '\n'.join('import ' + i for i in imports)
             content += f'\nset_option maxHeartbeats 1000000\n'
@@ -318,7 +352,7 @@ def verify(source, request_path, out, timeout=300):
                     audited.append({'file': f'{module}.lean', 'theorem': theorem})
             except (TimeoutError, ValueError) as error:
                 result = {'status': 'unknown', 'diagnostic': str(error), 'log': str(log)}
-            if result['status'] == 'unknown' and request.get('profile') != 'paxos':
+            if result['status'] == 'unknown':
                 negative = claim.get('refutation', 'by first | simp_all | omega | grind')
                 negative_module = f'Refutation{index}'
                 negative_theorem = f'VerifiedRequest.refutation{index}'
@@ -334,27 +368,35 @@ def verify(source, request_path, out, timeout=300):
                         audited.append({'file': f'{negative_module}.lean', 'theorem': negative_theorem})
                 except (TimeoutError, ValueError):
                     pass  # A failed search/proof of the negation supplies no evidence.
-            report['properties'][claim['name']] = result
+            report['properties'][claim['name']].update(result)
         statuses = {c['status'] for c in report['properties'].values()}
         report['status'] = 'proved' if statuses == {'proved'} else ('refuted' if 'refuted' in statuses else 'unknown')
-        report['translation'] = 'refinement-proved' if request.get('profile') == 'paxos' and report['status'] == 'proved' else 'extracted'
+        # Refinement is an explicit user claim, never inferred from a profile name.
+        report['translation'] = 'extracted'
         manifest = {'project': str(project.relative_to(evidence)), 'obligations': audited,
+                    'extracted_module': f'{lib}.Extraction',
                     'files': source_hashes(crate), 'source': str(crate.relative_to(evidence)),
                     'timeout': timeout, 'request_sha256': digest(evidence / 'statements.json'),
+                    'input_request_sha256': digest(evidence / 'input-request.json'),
+                    'elaborated_sha256': digest(evidence / 'elaborated.json'),
                     'extractor_wrapper_sha256': digest(wrapper)}
-        manifest['report_sha256'] = hashlib.sha256((json.dumps(report, indent=2) + '\n').encode()).hexdigest()
-        (evidence / 'recheck.json').write_text(json.dumps(manifest, indent=2) + '\n')
+        manifest['report_sha256'] = hashlib.sha256((json.dumps(report, indent=2, ensure_ascii=False) + '\n').encode()).hexdigest()
+        (evidence / 'recheck.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n')
         shutil.copyfile(Path(__file__), evidence / 'rust_verify.py')
+        shutil.copyfile(Path(__file__).with_name('rust_spec.py'), evidence / 'rust_spec.py')
         return report
     except TimeoutError as error:
         report['status'] = 'unknown'
+        for result in report['properties'].values():
+            if result['status'] == 'not-run':
+                result['status'] = 'unknown'
         report['diagnostics'].append(str(error))
         return report
     except (ValueError, OSError, zipfile.BadZipFile, json.JSONDecodeError) as error:
         report['diagnostics'].append(str(error))
         return report
     finally:
-        (evidence / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+        (evidence / 'report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
 
 
 def recheck(evidence):
@@ -366,6 +408,9 @@ def recheck(evidence):
         raise ValueError('changed verification report')
     if digest(evidence / 'statements.json') != manifest['request_sha256']:
         raise ValueError('changed verification request')
+    for name, key in (('input-request.json', 'input_request_sha256'), ('elaborated.json', 'elaborated_sha256')):
+        if key in manifest and digest(evidence / name) != manifest[key]:
+            raise ValueError(f'changed evidence: {name}')
     source = evidence / manifest['source']
     for name, expected in manifest['files'].items():
         if digest(source / name) != expected:
@@ -375,13 +420,19 @@ def recheck(evidence):
     packages = project / '.lake/packages'
     if packages.is_symlink() and not packages.exists():
         packages.unlink()
+    if manifest.get('extracted_module') and run(['lake', 'build', '+' + manifest['extracted_module']],
+            project, evidence / 'rebuild-extracted.log', manifest['timeout']):
+        raise ValueError('extracted evidence build failed; see rebuild-extracted.log')
     if run(['lake', 'build'], project, evidence / 'rebuild.log', manifest['timeout']):
         raise ValueError('evidence build failed; see rebuild.log')
+    modules = {}
     for item in manifest['obligations']:
-        log = evidence / (item['file'] + '.recheck.log')
-        if run(['lake', 'env', 'lean', item['file']], project, log, manifest['timeout']):
-            raise ValueError(f'Lean rejected {item["file"]}')
-        audit(log.read_text(), [item['theorem']])
+        modules.setdefault(item['file'], []).append(item['theorem'])
+    for file, names in modules.items():
+        log = evidence / (file + '.recheck.log')
+        if run(['lake', 'env', 'lean', file], project, log, manifest['timeout']):
+            raise ValueError(f'Lean rejected {file}')
+        audit(log.read_text(), names)
     report = json.loads((evidence / 'report.json').read_text())
     return {'status': report['status'], 'rechecked': len(manifest['obligations']),
             'note': 'unknown claims remain unknown; extraction/compiler boundary remains trusted'}
@@ -389,13 +440,21 @@ def recheck(evidence):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('source', nargs='?')
-    parser.add_argument('statements', nargs='?')
+    parser.add_argument('source', nargs='?', help='Rust library directory, .rs file, or ZIP')
+    parser.add_argument('statements', nargs='?', help='JSON/TOML spec; defaults to spec.toml or spec.json in a crate directory')
     parser.add_argument('--out', default=str(ROOT / '.rmverify/rust'))
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--install', action='store_true')
     parser.add_argument('--recheck')
+    parser.add_argument('--explain-spec', metavar='FILE', help='preview claims and assumptions in plain text without running tools')
+    parser.add_argument('--check-spec', metavar='FILE', help='validate and print explicit Lean claims without extracting Rust')
     args = parser.parse_args()
+    if args.explain_spec:
+        print(explain_request(load_request(args.explain_spec)))
+        return 0
+    if args.check_spec:
+        print(json.dumps(compile_request(load_request(args.check_spec)), indent=2, ensure_ascii=False))
+        return 0
     if args.install:
         install()
         if not args.source:
@@ -403,10 +462,10 @@ def main():
     if args.recheck:
         report = recheck(args.recheck)
     else:
-        if not args.source or not args.statements:
-            parser.error('supply (Rust crate/.rs/.zip, statements.json)')
+        if not args.source:
+            parser.error('supply a Rust crate, .rs file, or ZIP and optionally a spec.json/spec.toml')
         report = verify(args.source, args.statements, args.out, args.timeout)
-    print(json.dumps(report, indent=2))
+    print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0 if report['status'] == 'proved' else 1
 
 

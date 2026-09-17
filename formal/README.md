@@ -5,8 +5,12 @@ records the intended architecture, proof boundaries, tooling, and first usabilit
 
 The [Rust-to-Lean pipeline](rust/README.md) accepts `(crate / .rs / ZIP, statements.json)`
 and includes implementation-backed safety and conditional-liveness proofs for a
-three-acceptor Rust Paxos core. Run `python3 formal/rust_verify.py formal/rust/paxos formal/rust/requests-paxos.json`.
+three-acceptor Rust Paxos core. Run `python3 formal/rust_verify.py formal/rust/paxos`.
 The Python workflow documented below remains supported.
+Use the [general specification interface](rust/SPECIFICATIONS.md) for new protocols;
+the [agent skill](skills/write-verification-spec/SKILL.md) explains how to write and
+review safety/liveness specifications. [Pedersen commitments](rust/pedersen/README.md)
+demonstrate distributional hiding and a binding reduction through the same driver.
 
 `rmverify` checks a small typed Python fragment. Implementations remain ordinary
 Python; separate `Specification` and `Composition` objects select transitions,
@@ -294,3 +298,6 @@ Local acceptor safety and global Paxos agreement are separate proof obligations.
 The [Paxos model notes](reports/paxos-model.md) record the actual results and
 remaining proof work. No fairness, eventual decision, crash recovery, socket
 behavior, general quorum families, or checked TLA+ refinement is claimed.
+
+The [delivery report](reports/delivery-report.md) includes the final validation results
+and the [client PowerPoint](reports/rust-verification-delivery.pptx).

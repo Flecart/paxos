@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import zipfile
 from formal import rust_verify as engine
+from formal.rust_spec import compile_request
 
 
 class RustPipelineTests(unittest.TestCase):
@@ -77,6 +78,34 @@ class RustPipelineTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     engine.load_request(path)
 
+    def test_structured_specifications_validate_and_expose_assumptions(self):
+        spec = engine.load_request(engine.ROOT / 'formal/rust/delivery/spec.toml')
+        compiled = compile_request(spec)
+        self.assertEqual(compiled['claims'][0]['assumptions'], [])
+        self.assertEqual(compiled['claims'][2]['assumptions'], ['Delivery.Fair'])
+        for invalid in ({**spec, 'version': 2}, {**spec, 'typo': True},
+                        {**spec, 'system': {'module': 'Delivery.module'}},
+                        {**spec, 'claims': [{'name': 'x', 'kind': 'leads_to', 'from': 'Delivery.Waiting'}]},
+                        {**spec, 'claims': [{'name': 'x', 'kind': 'invariant', 'predicate': 'Delivery.Valid', 'statement': 'True'}]}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                compile_request(invalid)
+        legacy = engine.load_request(engine.ROOT / 'formal/rust/requests-paxos.json')
+        self.assertEqual([c['name'] for c in compile_request(legacy)['claims']], ['safety', 'liveness'])
+
+    def test_spec_discovery_preview_and_toml_json_equivalence(self):
+        source = engine.ROOT / 'formal/rust/delivery'
+        spec = engine.load_request(engine.discover_spec(source))
+        preview = engine.explain_request(spec)
+        self.assertIn('Assumptions: Delivery.Fair', preview)
+        self.assertIn('without fairness assumptions', preview)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'spec.json').write_text(json.dumps(spec))
+            self.assertEqual(engine.load_request(engine.discover_spec(root)), spec)
+            (root / 'spec.toml').write_text('version = 1')
+            with self.assertRaisesRegex(ValueError, 'explicitly'):
+                engine.discover_spec(root)
+
     @unittest.skipUnless(os.environ.get('RMVERIFY_RUST_INTEGRATION') == '1', 'requires pinned extraction tools')
     def test_custom_source_checked_proof_refutation_and_sorry_rejection(self):
         with tempfile.TemporaryDirectory(dir=engine.ROOT / '.rmverify') as tmp:
@@ -101,13 +130,13 @@ class RustPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=engine.ROOT / '.rmverify') as tmp:
             root = Path(tmp)
             source = engine.ROOT / 'formal/rust/paxos'
-            request = engine.ROOT / 'formal/rust/requests-paxos.json'
+            request = source / 'spec.json'
             result = engine.verify(source, request, root / 'evidence', timeout=600)
             self.assertEqual(result['status'], 'proved', result)
-            self.assertEqual(engine.recheck(result['evidence'])['rechecked'], 2)
+            self.assertEqual(engine.recheck(result['evidence'])['rechecked'], 4)
             archive = root / 'paxos.zip'
             with zipfile.ZipFile(archive, 'w') as z:
-                for relative in ('Cargo.toml', 'src/lib.rs'):
+                for relative in ('Cargo.toml', 'src/lib.rs', 'verification/Protocol.lean'):
                     z.write(source / relative, 'paxos/' + relative)
                 z.writestr('paxos/src/main.rs', 'fn main() { println!(\"runtime excluded\"); }')
             zipped = engine.verify(archive, request, root / 'evidence', timeout=600)
@@ -123,6 +152,39 @@ class RustPipelineTests(unittest.TestCase):
             self.assertEqual(stalled['status'], 'unknown', stalled)
             self.assertRegex((Path(stalled['evidence']) / 'build.log').read_text(),
                              r"'PaxosBridge\.liveness' depends on axioms: \[[^\]]*sorryAx")
+
+    @unittest.skipUnless(os.environ.get('RMVERIFY_RUST_INTEGRATION') == '1', 'requires pinned extraction tools')
+    def test_delivery_temporal_claims_and_unfair_refutation(self):
+        with tempfile.TemporaryDirectory(dir=engine.ROOT / '.rmverify') as tmp:
+            root = Path(tmp)
+            source = engine.ROOT / 'formal/rust/delivery'
+            result = engine.verify(source, source / 'spec.toml', root / 'evidence', timeout=600)
+            self.assertEqual(result['status'], 'proved', result)
+            request = engine.load_request(source / 'spec.toml')
+            request['system']['assumptions'] = []
+            request['claims'] = [{'name': 'unfair', 'kind': 'eventually', 'predicate': 'Delivery.Done',
+                                  'refutation': 'Delivery.no_unconditional_progress'}]
+            path = root / 'unfair.json'
+            path.write_text(json.dumps(request))
+            unfair = engine.verify(source, path, root / 'evidence', timeout=600)
+            self.assertEqual(unfair['properties']['unfair']['status'], 'refuted', unfair)
+            self.assertEqual(engine.recheck(unfair['evidence'])['status'], 'refuted')
+
+    @unittest.skipUnless(os.environ.get('RMVERIFY_RUST_INTEGRATION') == '1', 'requires pinned extraction tools')
+    def test_pedersen_security_and_missing_blinding_mutation(self):
+        with tempfile.TemporaryDirectory(dir=engine.ROOT / '.rmverify') as tmp:
+            root = Path(tmp)
+            source = engine.ROOT / 'formal/rust/pedersen'
+            result = engine.verify(source, source / 'spec.json', root / 'evidence', timeout=600)
+            self.assertEqual(result['status'], 'proved', result)
+            self.assertEqual(engine.recheck(result['evidence'])['status'], 'proved')
+            mutant = engine.unpack(source, root / 'mutant')
+            path = mutant / 'src/lib.rs'
+            path.write_text(path.read_text().replace('h.scale(blind)', 'h.scale(message)'))
+            broken = engine.verify(mutant, source / 'spec.json', root / 'evidence', timeout=600)
+            self.assertEqual(broken['status'], 'unknown', broken)
+            self.assertRegex((Path(broken['evidence']) / 'build.log').read_text(),
+                             r"'Pedersen\.commit_refines' depends on axioms: \[[^\]]*sorryAx")
 
 
 if __name__ == '__main__':

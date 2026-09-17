@@ -1,0 +1,47 @@
+# Start here: names refer to predicates and lemmas in verification/Protocol.lean.
+# English descriptions explain intent; the fields below determine the theorem.
+version = 1
+title = "Reliable delivery latch"
+description = "A minimal event handler demonstrating every temporal claim form. The environment must eventually schedule an enabled delivery."
+imports = ["UserVerification.Protocol"]
+
+[system]
+module = "Delivery.module"
+# Removing fairness makes eventual delivery false (an idle run is possible).
+assumptions = ["Delivery.Fair"]
+
+[[claims]]
+name = "valid_state"
+description = "The latch is always either waiting (0) or delivered (1)."
+kind = "invariant"
+predicate = "Delivery.Valid"
+proof = "Delivery.safe"
+
+[[claims]]
+name = "valid_execution"
+description = "Every state of a fair execution has a valid latch value."
+kind = "always"
+predicate = "Delivery.Valid"
+proof = "Delivery.always_valid"
+
+[[claims]]
+name = "eventual_delivery"
+description = "Every fair execution eventually delivers the message."
+kind = "eventually"
+predicate = "Delivery.Done"
+proof = "Delivery.eventually_done"
+
+[[claims]]
+name = "pending_completes"
+description = "Whenever the latch is waiting, it eventually becomes delivered."
+kind = "leads_to"
+from = "Delivery.Waiting"
+to = "Delivery.Done"
+proof = "Delivery.progress"
+
+[[claims]]
+name = "fairness_is_needed"
+description = "An execution that idles forever disproves unconditional delivery."
+kind = "lean"
+statement = "¬ RMVerify.Spec.Eventually Delivery.module (fun _ => True) Delivery.Done"
+proof = "Delivery.no_unconditional_progress"

@@ -1,5 +1,6 @@
 import VerifiedPaxos.Extraction
 import Paxos
+import Specification
 
 /- This adapter gives the composed operational semantics of the extracted Rust
    components. Histories are ghost state: the environment can deliver only
@@ -244,6 +245,19 @@ theorem liveness : LivenessClaim := by
   refine ⟨local_progress, ?_⟩
   intro run hr b q start live
   exact Paxos.liveness run (execution_refines run hr) b.val q start live
+
+def Agreement (s : Paxos.State) : Prop := ∀ v w, Learned s v → Learned s w → v = w
+
+def StableFairQuorum (run : Nat → Paxos.State) : Prop :=
+  ∃ (b : U64), ∃ q start, Paxos.Live run b.val q start
+
+def Decided (s : Paxos.State) : Prop := ∃ b v, Paxos.Chosen s b v
+
+theorem eventually_decided : RMVerify.Spec.Eventually module StableFairQuorum Decided := by
+  intro run exec env
+  obtain ⟨b,q,start,live⟩ := env
+  obtain ⟨n,_,v,hv⟩ := liveness.2 run exec b q start live
+  exact ⟨n, Nat.zero_le n, b.val, v, hv⟩
 
 #print axioms initial_eq
 #print axioms proposer_initial_eq

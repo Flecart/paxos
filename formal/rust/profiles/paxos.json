@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "title": "Paxos compatibility profile",
+  "description": "Three non-Byzantine acceptors, authentic retained messages, unique ballots, serialized state; liveness requires a stable fair quorum. Protocol core only.",
+  "imports": ["UserVerification.Protocol"],
+  "support": ["Paxos"],
+  "claims": [
+    {"name": "safety", "statement": "PaxosBridge.SafetyClaim", "proof": "PaxosBridge.safety"},
+    {"name": "liveness", "statement": "PaxosBridge.LivenessClaim", "proof": "PaxosBridge.liveness"}
+  ]
+}

@@ -1,5 +1,5 @@
 name = "rmverifyEvidence"
-defaultTargets = ["Semantics", "TypedSource", "Borrowing", "Network", "VeilAdapter", "Temporal", "Paxos"]
+defaultTargets = ["Semantics", "TypedSource", "Borrowing", "Network", "VeilAdapter", "Temporal", "Paxos", "Specification"]
 
 [[require]]
 name = "veil"
@@ -26,3 +26,6 @@ name = "Temporal"
 
 [[lean_lib]]
 name = "Paxos"
+
+[[lean_lib]]
+name = "Specification"

@@ -9,5 +9,4 @@ __pycache__/
 
 # Rust compilation and extraction intermediates.
 formal/rust/**/target/
-formal/rust/**/proofs/lean/llbc/
-formal/rust/paxos/proofs/
+formal/rust/**/proofs/
