@@ -1,11 +1,12 @@
-//! Deployable single-decree Paxos for a three-replica cluster.
+//! Deployable single-decree Paxos for a cluster of `n` replicas (1 ≤ n ≤ 255).
 //!
 //! [`Node`] is the complete protocol state of one replica: acceptor, proposer
 //! (with ballot allocation and preemption handling) and learner. It performs no
 //! I/O and is deterministic. Each call to [`Node::handle`] consumes one input and
 //! emits at most one message; this is the code extracted to Lean and verified.
+//! Any strict majority of the `n` replicas is a quorum.
 //!
-//! Runtime contract (implemented by `src/bin/paxosd.rs`):
+//! Runtime contract (implemented by `src/bin/paxosd`):
 //! * inputs to one node are processed one at a time;
 //! * the state returned by `handle` is durably stored *before* its message is
 //!   sent, and a restarted replica resumes from its last stored state;
@@ -14,8 +15,6 @@
 //!   delayed, reordered or lost);
 //! * a message addressed to [`Dest::All`] is offered to every replica, itself included.
 
-/// Replica identifiers are `0..NODES`; any two replicas form a quorum.
-pub const NODES: u8 = 3;
 /// Ballot allocation stops at this bound, so ballot arithmetic cannot overflow.
 pub const BALLOT_LIMIT: u64 = 4_611_686_018_427_387_904; // 2^62
 
@@ -23,6 +22,13 @@ pub const BALLOT_LIMIT: u64 = 4_611_686_018_427_387_904; // 2^62
 pub struct Vote {
     pub ballot: u64,
     pub value: u64,
+}
+
+/// A promise for `ballot` reporting the acceptor's last vote.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Promise {
+    pub ballot: u64,
+    pub accepted: Option<Vote>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,25 +66,25 @@ pub enum Input {
 
 /// One replica. Fields are public so the runtime can persist and restore them;
 /// they must only ever hold a state previously returned by `new` or `handle`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Node {
     pub id: u8,
+    /// Cluster size.
+    pub n: u8,
     // Acceptor.
     pub promised: u64,
     pub accepted: Option<Vote>,
     // Proposer. `ballot == 0` means no attempt has started. Ballots owned by
-    // replica `i` are exactly those congruent to `i` modulo `NODES`.
+    // replica `i` are exactly those congruent to `i` modulo `n`.
     pub value: Option<u64>,
     pub ballot: u64,
     pub max_seen: u64,
     pub proposal: Option<u64>,
-    pub promise0: Option<Option<Vote>>,
-    pub promise1: Option<Option<Vote>>,
-    pub promise2: Option<Option<Vote>>,
+    /// Latest promise received from each acceptor; only entries whose ballot
+    /// equals `ballot` count, so a new ballot needs no reset.
+    pub promises: Vec<Option<Promise>>,
     // Learner: the highest-ballot vote announced by each acceptor.
-    pub vote0: Option<Vote>,
-    pub vote1: Option<Vote>,
-    pub vote2: Option<Vote>,
+    pub votes: Vec<Option<Vote>>,
     pub decided: Option<u64>,
 }
 
@@ -90,83 +96,94 @@ fn higher(a: u64, b: u64) -> u64 {
     }
 }
 
-/// The smallest ballot above `floor` owned by replica `id`.
-/// Callers keep `floor < BALLOT_LIMIT`, so this cannot overflow.
-pub fn next_ballot(floor: u64, id: u8) -> u64 {
-    (floor / 3 + 1) * 3 + id as u64
+/// The smallest ballot above `floor` owned by replica `id` in a cluster of `n`.
+/// Callers keep `floor < BALLOT_LIMIT` and `n > 0`, so this cannot overflow.
+pub fn next_ballot(floor: u64, id: u8, n: u8) -> u64 {
+    (floor / n as u64 + 1) * n as u64 + id as u64
 }
 
-/// Value to propose after promises from two distinct acceptors: the value of
-/// the highest-ballot vote reported, or the proposer's own value if none.
-pub fn select(left: Option<Vote>, right: Option<Vote>, offered: u64) -> u64 {
-    match (left, right) {
-        (Some(a), Some(b)) => {
-            if b.ballot > a.ballot {
-                b.value
-            } else {
-                a.value
+/// Strict majority of `n`.
+pub fn majority(count: u64, n: u8) -> bool {
+    count > n as u64 / 2
+}
+
+/// Number of acceptors whose recorded promise is for ballot `b`.
+pub fn count_promises(ps: &Vec<Option<Promise>>, b: u64) -> u64 {
+    let mut i: usize = 0;
+    let mut c: u64 = 0;
+    while i < ps.len() {
+        if let Some(p) = ps[i] {
+            if p.ballot == b {
+                c += 1;
             }
         }
-        (Some(a), None) => a.value,
-        (None, Some(b)) => b.value,
-        (None, None) => offered,
+        i += 1;
     }
+    c
 }
 
-fn same(a: Vote, b: Vote) -> bool {
-    a.ballot == b.ballot && a.value == b.value
+/// Highest-ballot vote reported by the promises recorded for ballot `b`.
+pub fn highest(ps: &Vec<Option<Promise>>, b: u64) -> Option<Vote> {
+    let mut i: usize = 0;
+    let mut best: Option<Vote> = None;
+    while i < ps.len() {
+        if let Some(p) = ps[i] {
+            if p.ballot == b {
+                if let Some(v) = p.accepted {
+                    best = match best {
+                        Some(m) => {
+                            if v.ballot > m.ballot {
+                                Some(v)
+                            } else {
+                                Some(m)
+                            }
+                        }
+                        None => Some(v),
+                    };
+                }
+            }
+        }
+        i += 1;
+    }
+    best
 }
 
-/// Two distinct acceptors announced the same vote.
-fn agreed(v0: Option<Vote>, v1: Option<Vote>, v2: Option<Vote>) -> Option<u64> {
-    if let (Some(a), Some(b)) = (v0, v1) {
-        if same(a, b) {
-            return Some(a.value);
+/// Number of acceptors whose announced vote is exactly `v`.
+pub fn count_votes(vs: &Vec<Option<Vote>>, v: Vote) -> u64 {
+    let mut i: usize = 0;
+    let mut c: u64 = 0;
+    while i < vs.len() {
+        if let Some(x) = vs[i] {
+            if x.ballot == v.ballot && x.value == v.value {
+                c += 1;
+            }
         }
+        i += 1;
     }
-    if let (Some(a), Some(c)) = (v0, v2) {
-        if same(a, c) {
-            return Some(a.value);
-        }
-    }
-    if let (Some(b), Some(c)) = (v1, v2) {
-        if same(b, c) {
-            return Some(b.value);
-        }
-    }
-    None
-}
-
-/// Promises recorded from two distinct acceptors, if any.
-fn quorum(
-    p0: Option<Option<Vote>>,
-    p1: Option<Option<Vote>>,
-    p2: Option<Option<Vote>>,
-) -> Option<(Option<Vote>, Option<Vote>)> {
-    match (p0, p1, p2) {
-        (Some(a), Some(b), _) => Some((a, b)),
-        (Some(a), None, Some(c)) => Some((a, c)),
-        (None, Some(b), Some(c)) => Some((b, c)),
-        _ => None,
-    }
+    c
 }
 
 impl Node {
-    pub fn new(id: u8) -> Node {
+    pub fn new(id: u8, n: u8) -> Node {
+        let mut promises = Vec::new();
+        let mut votes = Vec::new();
+        let mut i: u8 = 0;
+        while i < n {
+            promises.push(None);
+            votes.push(None);
+            i += 1;
+        }
         Node {
             id,
+            n,
             promised: 0,
             accepted: None,
             value: None,
             ballot: 0,
             max_seen: 0,
             proposal: None,
-            promise0: None,
-            promise1: None,
-            promise2: None,
-            vote0: None,
-            vote1: None,
-            vote2: None,
+            promises,
+            votes,
             decided: None,
         }
     }
@@ -184,7 +201,7 @@ impl Node {
     }
 
     fn deliver(&mut self, from: u8, msg: Msg) -> Option<Send> {
-        if from >= NODES {
+        if from >= self.n {
             return None;
         }
         match msg {
@@ -254,55 +271,46 @@ impl Node {
         if let Some(_) = self.proposal {
             return None;
         }
-        if from == 0 {
-            self.promise0 = Some(accepted);
-        } else if from == 1 {
-            self.promise1 = Some(accepted);
-        } else {
-            self.promise2 = Some(accepted);
+        if from as usize >= self.promises.len() {
+            return None;
         }
+        self.promises[from as usize] = Some(Promise { ballot, accepted });
         let offered = match self.value {
             Some(v) => v,
             None => return None,
         };
-        match quorum(self.promise0, self.promise1, self.promise2) {
-            Some((left, right)) => {
-                let value = select(left, right, offered);
-                self.proposal = Some(value);
-                Some(Send {
-                    to: Dest::All,
-                    msg: Msg::Accept {
-                        vote: Vote { ballot, value },
-                    },
-                })
-            }
-            None => None,
+        if majority(count_promises(&self.promises, ballot), self.n) {
+            let value = match highest(&self.promises, ballot) {
+                Some(m) => m.value,
+                None => offered,
+            };
+            self.proposal = Some(value);
+            Some(Send {
+                to: Dest::All,
+                msg: Msg::Accept {
+                    vote: Vote { ballot, value },
+                },
+            })
+        } else {
+            None
         }
     }
 
     fn on_accepted(&mut self, from: u8, vote: Vote) -> Option<Send> {
-        let current = if from == 0 {
-            self.vote0
-        } else if from == 1 {
-            self.vote1
-        } else {
-            self.vote2
-        };
-        let newer = match current {
+        if from as usize >= self.votes.len() {
+            return None;
+        }
+        let newer = match self.votes[from as usize] {
             Some(old) => vote.ballot > old.ballot,
             None => true,
         };
         if newer {
-            if from == 0 {
-                self.vote0 = Some(vote);
-            } else if from == 1 {
-                self.vote1 = Some(vote);
-            } else {
-                self.vote2 = Some(vote);
-            }
+            self.votes[from as usize] = Some(vote);
         }
         if let None = self.decided {
-            self.decided = agreed(self.vote0, self.vote1, self.vote2);
+            if majority(count_votes(&self.votes, vote), self.n) {
+                self.decided = Some(vote.value);
+            }
         }
         None
     }
@@ -338,16 +346,16 @@ impl Node {
 
     /// Begin phase 1 with a fresh ballot above everything this replica has seen.
     fn start(&mut self) -> Option<Send> {
+        if self.n == 0 {
+            return None;
+        }
         let floor = higher(higher(self.max_seen, self.promised), self.ballot);
         if floor >= BALLOT_LIMIT {
             return None;
         }
-        let ballot = next_ballot(floor, self.id);
+        let ballot = next_ballot(floor, self.id, self.n);
         self.ballot = ballot;
         self.proposal = None;
-        self.promise0 = None;
-        self.promise1 = None;
-        self.promise2 = None;
         Some(Send {
             to: Dest::All,
             msg: Msg::Prepare { ballot },

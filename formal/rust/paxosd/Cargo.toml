@@ -2,7 +2,7 @@
 name = "deployable-paxos"
 version = "0.1.0"
 edition = "2021"
-description = "Three-replica single-decree Paxos: verified state machine plus a std-only UDP runtime"
+description = "N-replica single-decree Paxos: verified state machine plus a std-only UDP runtime"
 
 [lib]
 name = "deployable_paxos"

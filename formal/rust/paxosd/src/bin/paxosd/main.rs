@@ -1,4 +1,6 @@
-//! `paxosd`: a three-replica Paxos service around the verified `Node`.
+//! `paxosd`: an N-replica Paxos service (1 ≤ N ≤ 255) around the verified `Node`.
+//! The cluster size N is the number of `--peers` addresses; any strict majority
+//! is a quorum.
 //!
 //! The runtime implements the environment contract of the Lean model:
 //! * inputs are processed one at a time; the new replica state and the packet it
@@ -12,7 +14,7 @@
 //!   timer, which approximates the stable-leader assumption of the liveness proof.
 //!
 //! Commands:
-//!   paxosd serve   --id N --peers A0,A1,A2 --data DIR --key SECRET [--tick-ms 50] [--suspect-ms 600]
+//!   paxosd serve   --id I --peers A0,A1,...,A(N-1) --data DIR --key SECRET [--tick-ms 50] [--suspect-ms 600]
 //!   paxosd propose --node ADDR VALUE [--timeout-ms 10000]
 //!   paxosd status  --node ADDR
 
@@ -36,6 +38,11 @@ const CLIENT: &[u8; 4] = b"PXC1";
 const REPLY: &[u8; 4] = b"PXR1";
 const TAG: usize = 16;
 const OUTBOX_LIMIT: usize = 100_000;
+const USAGE: &str = "usage:
+  paxosd serve   --id I --peers A0,A1,...,A(N-1) --data DIR --key SECRET [--tick-ms 50] [--suspect-ms 600]
+                 (1 <= N <= 255 replicas, 0 <= I < N; every replica gets the same --peers list)
+  paxosd propose --node ADDR VALUE [--timeout-ms 10000]
+  paxosd status  --node ADDR";
 
 struct Config {
     id: u8,
@@ -52,7 +59,8 @@ struct Server {
     store: Store,
     node: Node,
     outbox: Vec<Send>,
-    heard: [Instant; 3],
+    /// Last time a heartbeat or packet arrived from each replica (length N).
+    heard: Vec<Instant>,
     waiting: Vec<SocketAddr>,
     next_tick: Instant,
     next_resend: Instant,
@@ -74,12 +82,13 @@ impl Server {
         let sock = UdpSocket::bind(cfg.peers[cfg.id as usize])?;
         sock.set_read_timeout(Some(cfg.tick / 2))?;
         let store = Store::open(&cfg.data)?;
-        let (node, outbox) = match store.load(cfg.id)? {
+        let n = cfg.peers.len() as u8;
+        let (node, outbox) = match store.load(cfg.id, n)? {
             Some(saved) => {
                 log(cfg.id, &format!("recovered durable state, {} packets to retransmit", saved.1.len()));
                 saved
             }
-            None => (Node::new(cfg.id), Vec::new()),
+            None => (Node::new(cfg.id, n), Vec::new()),
         };
         let now = Instant::now();
         let tick = cfg.tick;
@@ -90,7 +99,7 @@ impl Server {
             node,
             outbox,
             // A (re)started replica first listens for a while before leading.
-            heard: [now; 3],
+            heard: vec![now; n as usize],
             waiting: Vec::new(),
             next_tick: now,
             next_resend: now,
@@ -128,7 +137,7 @@ impl Server {
     fn process(&mut self, input: Input) -> io::Result<()> {
         let mut queue = VecDeque::from([input]);
         while let Some(input) = queue.pop_front() {
-            let before = self.node;
+            let before = self.node.clone();
             let out = self.node.handle(input);
             let mut dirty = self.node != before;
             if let Some(send) = out {
@@ -209,7 +218,7 @@ impl Server {
                 }
                 let mut r = Reader::new(&body[4..]);
                 let src = match r.u8() {
-                    Some(s) if s < 3 && s != self.cfg.id => s,
+                    Some(s) if (s as usize) < self.cfg.peers.len() && s != self.cfg.id => s,
                     _ => return Ok(()),
                 };
                 self.heard[src as usize] = Instant::now();
@@ -343,7 +352,7 @@ fn required<'a>(args: &'a [String], name: &str) -> Result<&'a str, String> {
 fn serve(args: &[String]) -> Result<(), String> {
     let id: u8 = required(args, "--id")?
         .parse()
-        .map_err(|_| "--id expects 0, 1 or 2".to_string())?;
+        .map_err(|_| "--id expects a replica index 0..N-1".to_string())?;
     let peers = required(args, "--peers")?
         .split(',')
         .map(|p| {
@@ -353,8 +362,11 @@ fn serve(args: &[String]) -> Result<(), String> {
                 .ok_or_else(|| format!("bad peer address {p}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if peers.len() != 3 || id >= 3 {
-        return Err("exactly three peers are required and --id must be 0, 1 or 2".into());
+    if peers.is_empty() || peers.len() > 255 {
+        return Err("--peers must list between 1 and 255 addresses".into());
+    }
+    if id as usize >= peers.len() {
+        return Err(format!("--id must be below the number of peers ({})", peers.len()));
     }
     let key = required(args, "--key")?.as_bytes().to_vec();
     if key.len() < 16 {
@@ -400,7 +412,7 @@ fn main() -> ExitCode {
             }
             Ok(())
         })(),
-        _ => Err("usage: paxosd serve|propose|status (see source header)".into()),
+        _ => Err(USAGE.into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

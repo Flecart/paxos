@@ -11,7 +11,8 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8; 4] = b"PXS1";
+/// `PXS2`: the N-replica layout (cluster size plus length-prefixed vectors).
+const MAGIC: &[u8; 4] = b"PXS2";
 
 pub struct Store {
     dir: PathBuf,
@@ -33,7 +34,8 @@ impl Store {
         self.dir.join("replica.state")
     }
 
-    pub fn load(&self, id: u8) -> io::Result<Option<(Node, Vec<Send>)>> {
+    /// Load the stored state of replica `id` in a cluster of `n` replicas.
+    pub fn load(&self, id: u8, n: u8) -> io::Result<Option<(Node, Vec<Send>)>> {
         let bytes = match fs::read(self.path()) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -53,6 +55,12 @@ impl Store {
         let node = r.node().ok_or_else(|| corrupt("has a malformed replica"))?;
         if node.id != id {
             return Err(corrupt("belongs to a different replica id"));
+        }
+        if node.n != n {
+            return Err(corrupt("belongs to a cluster of a different size"));
+        }
+        if node.promises.len() != n as usize || node.votes.len() != n as usize {
+            return Err(corrupt("has vectors that do not match the cluster size"));
         }
         let count = r.u32().ok_or_else(|| corrupt("is truncated"))?;
         let mut outbox = Vec::new();
@@ -96,21 +104,28 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("paxosd-store-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let store = Store::open(&dir).unwrap();
-        assert!(store.load(1).unwrap().is_none());
-        let mut n = Node::new(1);
+        assert!(store.load(1, 3).unwrap().is_none());
+        let mut n = Node::new(1, 3);
         n.promised = 4;
         let outbox = vec![Send {
             to: Dest::To(1),
             msg: Msg::Nack { ballot: 3, promised: 4 },
         }];
         store.save(&n, &outbox).unwrap();
-        let (m, o) = store.load(1).unwrap().unwrap();
+        let (m, o) = store.load(1, 3).unwrap().unwrap();
         assert!(m == n && o == outbox);
-        assert!(store.load(2).is_err());
+        assert!(store.load(2, 3).is_err());
+        assert!(store.load(1, 5).is_err());
+        // Vectors whose length disagrees with `n` are rejected.
+        let mut short = n.clone();
+        short.votes.pop();
+        store.save(&short, &outbox).unwrap();
+        assert!(store.load(1, 3).is_err());
+        store.save(&n, &outbox).unwrap();
         let mut bytes = fs::read(dir.join("replica.state")).unwrap();
         bytes[6] ^= 1;
         fs::write(dir.join("replica.state"), bytes).unwrap();
-        assert!(store.load(1).is_err());
+        assert!(store.load(1, 3).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

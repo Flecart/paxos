@@ -13,7 +13,7 @@ Examples include [delivery](delivery/spec.toml), [Paxos](paxos/spec.json),
 [deployable Paxos](paxosd/README.md), and [Pedersen commitments](pedersen/README.md).
 
 [`paxosd`](paxosd/README.md) is the deployable version. It verifies a complete replica state
-machine (ballot allocation, preemption retry, learner) composed into a three-replica
+machine (ballot allocation, preemption retry, learner) composed into an N-replica
 deployment with a lossy network and crash/restart. It proves agreement and validity
 without assumptions, and liveness under a stable-leader, fair-delivery environment,
 and it ships a std-only UDP runtime with durable storage.

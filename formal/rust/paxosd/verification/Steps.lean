@@ -5,11 +5,15 @@ import UserVerification.Refinement
 namespace PaxosSystem
 open CoreModels Aeneas Aeneas.Std RustM deployable_paxos PaxosNode RMVerify
 
-def Good (w w' : World) : Prop := Inv w' ∧ Paxos.Step (abs w) (abs w')
+set_option linter.unusedSectionVars false
 
-theorem abs_after (w : World) (i : Rid) (o : Opt Send) (n' : Node) :
-    (∀ a, (abs (w.after i (o, n'))).promised a = Paxos.put (abs w).promised i n'.promised.val a) ∧
-    (∀ a, (abs (w.after i (o, n'))).accepted a = Paxos.put (abs w).accepted i (snap n'.accepted) a) ∧
+variable {N : Nat} [Cluster N]
+
+def Good (w w' : World N) : Prop := Inv w' ∧ PaxosN.Step N (abs w) (abs w')
+
+theorem abs_after (w : World N) (i : Fin N) (o : Opt Send) (n' : Node) :
+    (∀ a, (abs (w.after i (o, n'))).promised a = PaxosN.put (abs w).promised i n'.promised.val a) ∧
+    (∀ a, (abs (w.after i (o, n'))).accepted a = PaxosN.put (abs w).accepted i (snap n'.accepted) a) ∧
     (∀ a c x, (abs (w.after i (o, n'))).promises a c x ↔ (abs w).promises a c x ∨
       ∃ s, o = .Some s ∧ a = i ∧ ∃ y z, s.msg = .Promise y z ∧ y.val = c ∧ snap z = x) ∧
     (∀ c v, (abs (w.after i (o, n'))).proposals c v ↔ (abs w).proposals c v ∨
@@ -18,8 +22,8 @@ theorem abs_after (w : World) (i : Rid) (o : Opt Send) (n' : Node) :
       ∃ s, o = .Some s ∧ a = i ∧ ∃ vt : Vote, s.msg = .Accepted vt ∧ vt.ballot.val = c ∧
         vt.value.val = v) := by
   refine ⟨fun a => ?_, fun a => ?_, fun a c x => ?_, fun c v => ?_, fun a c v => ?_⟩
-  · simp only [abs, after_node, Paxos.put]; split <;> rfl
-  · simp only [abs, after_node, Paxos.put]; split <;> rfl
+  · simp only [abs, after_node, PaxosN.put]; split <;> rfl
+  · simp only [abs, after_node, PaxosN.put]; split <;> rfl
   · simp only [abs, after_net]; constructor
     · rintro ⟨p, hp | ⟨hs, hi⟩, rest⟩
       · exact .inl ⟨p, hp, rest⟩
@@ -42,51 +46,70 @@ theorem abs_after (w : World) (i : Rid) (o : Opt Send) (n' : Node) :
       · exact ⟨p, .inl hp, rest⟩
       · exact ⟨⟨a, s⟩, .inr ⟨hs, rfl⟩, rfl, rest⟩
 
-theorem good_noop (w : World) (inv : Inv w) (i : Rid) : Good w (w.after i (.None, w.node i)) := by
+theorem good_noop (w : World N) (inv : Inv w) (i : Fin N) :
+    Good w (w.after i (.None, w.node i)) := by
   rw [after_noop]; exact ⟨inv, .idle⟩
 
-theorem good_dup (w : World) (inv : Inv w) (i : Rid) (s : Send) (h : w.net ⟨i, s⟩) :
+theorem good_dup (w : World N) (inv : Inv w) (i : Fin N) (s : Send) (h : w.net ⟨i, s⟩) :
     Good w (w.after i (.Some s, w.node i)) := by
   rw [after_dup w i s h]; exact ⟨inv, .idle⟩
 
 /-- Replica state unchanged, and a new packet that the abstract model ignores. -/
-theorem good_hidden (w : World) (inv : Inv w) (i : Rid) (s : Send) (hs : Hidden s.msg)
+theorem good_hidden (w : World N) (inv : Inv w) (i : Fin N) (s : Send) (hs : Hidden s.msg)
     (hpkt : PacketInv (w.after i (.Some s, w.node i)) ⟨i, s⟩) :
     Good w (w.after i (.Some s, w.node i)) := by
   refine ⟨inv_after w inv i _ _ (Grows.refl _) ?_ (fun s' e => by cases e; exact hpkt), ?_⟩
   · exact (inv.1 i).mono (after_self _ _ _) (net_grows w i _) (top_grows w i _ (Grows.refl _))
   · rw [abs_hidden w i _ _ rfl rfl (fun s' e => by cases e; exact .inl hs)]; exact .idle
 
-theorem good_submit (w : World) (inv : Inv w) (i : Rid) (v : U64) :
+theorem good_submit (w : World N) (inv : Inv w) (i : Fin N) (v : U64) :
     Good w (w.after i (handleS (w.node i) (.Submit v))) :=
   good_hidden w inv i _ trivial rfl
 
 /-! ## Timer -/
 
-theorem good_start (w : World) (inv : Inv w) (i : Rid) (hv : (w.node i).value ≠ .None) :
+theorem own_mod (f : Nat) (i : Fin N) : ((f / N + 1) * N + i.val) % N = i.val := by
+  rw [Nat.add_comm, Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt i.isLt]
+
+theorem majority_zero (n : U8) : ¬ Majority 0 n := by unfold Majority; omega
+
+theorem good_start (w : World N) (inv : Inv w) (i : Fin N) (hv : (w.node i).value ≠ .None) :
     Good w (w.after i (startS (w.node i))) := by
   have old := inv.1 i
   have g := start_grows (w.node i)
-  rcases start_cases (w.node i) with ⟨_, h⟩ | ⟨hl, ho, hb, he⟩
+  rcases start_cases (w.node i) with ⟨_, h⟩ | ⟨hpos, _, ho, hb, he⟩
   · rw [h]; exact good_noop w inv i
-  generalize startS (w.node i) = r at ho hb he g
+  have hgt := start_ballot_gt _ hpos hb
+  have hfl : (w.node i).ballot.val ≤ floorOf (w.node i) := by unfold floorOf; omega
+  generalize startS (w.node i) = r at ho hb he g hgt
   obtain ⟨o, n'⟩ := r
-  simp only at ho hb he g
+  simp only at ho hb he g hgt
   subst ho
-  generalize n'.ballot = b at hb he ⊢
+  generalize n'.ballot = b at hb he hgt ⊢
   subst he
-  have hbv : b.val = (floorOf (w.node i) / 3 + 1) * 3 + i.val := by
-    rw [hb, old.id, rid_val]
-  have hlt := i.isLt
+  have hbv : b.val = (floorOf (w.node i) / N + 1) * N + i.val := by
+    rw [hb, old.size, old.id, rid_val, u8_val]
   have tg := top_grows w i (.Some ⟨.All, .Prepare b⟩, fresh (w.node i) b) g
+  have hnew : ∀ (j : Fin N) p, pslot (w.node i) j = .Some p → p.ballot.val < b.val := by
+    intro j p h; have := (old.slot_le j p h).2; omega
   refine ⟨inv_after w inv i _ _ g ?_ ?_, ?_⟩
-  · refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp only [after_self, fresh]
+  · refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+      simp only [after_self, fresh]
     · exact old.id
-    · right; omega
+    · exact old.size
+    · exact old.plen
+    · exact old.vlen
+    · right; rw [hbv]; exact own_mod _ i
     · intro _; exact ⟨hv, sent_new _ _ _ _⟩
     · intro v h; cases h
-    · intro j y h; simp only [pslot] at h; split_ifs at h <;> cases h
-    · intro _; rfl
+    · intro j p h
+      exact ⟨(old.slot_le j p h).1, le_of_lt (hnew j p (by simpa [pslot] using h))⟩
+    · intro j p h e
+      have := hnew j p (by simpa [pslot] using h); rw [e] at this; omega
+    · intro _
+      rw [count_promises_zero (w.node i) old.plen b (fun j p h e => by
+        have := hnew j p h; rw [e] at this; omega)]
+      exact majority_zero _
     · exact le_trans old.promised_top tg
     · exact le_trans old.seen_top tg
     · intro v h; obtain ⟨p, hp, hm⟩ := old.request v h; exact ⟨p, .inl hp, hm⟩
@@ -95,16 +118,16 @@ theorem good_start (w : World) (inv : Inv w) (i : Rid) (hv : (w.node i).value �
       exact ⟨p, .inl hp, rest⟩
     · exact old.undecided
     · intro v h
-      obtain ⟨q, c, hq⟩ := old.decided v h
-      exact ⟨q, c, fun a ha => abs_votes_grow w i _ (hq a ha)⟩
+      obtain ⟨q, c, hq, hm⟩ := old.decided v h
+      exact ⟨q, c, hq, fun a ha => abs_votes_grow w i _ (hm a ha)⟩
   · intro s e; cases e
     simp only [PacketInv, after_self, fresh]
-    exact ⟨by omega, by omega, le_refl _⟩
+    exact ⟨by omega, by rw [hbv]; exact own_mod _ i, le_refl _⟩
   · rw [abs_hidden w i (.Some ⟨.All, .Prepare b⟩) (fresh (w.node i) b) rfl rfl
       (fun s e => by cases e; exact .inl trivial)]
     exact .idle
 
-theorem good_tick (w : World) (inv : Inv w) (i : Rid) :
+theorem good_tick (w : World N) (inv : Inv w) (i : Fin N) :
     Good w (w.after i (handleS (w.node i) .Tick)) := by
   have old := inv.1 i
   simp only [handleS, tickS]
@@ -122,7 +145,7 @@ theorem good_tick (w : World) (inv : Inv w) (i : Rid) :
 
 /-! ## Message delivery -/
 
-theorem deliver_rid (n : Node) (j : Rid) (msg : Msg) :
+theorem deliver_rid (n : Node) (hn : n.n = u8 N) (j : Fin N) (msg : Msg) :
     deliverS n (rid j) msg =
       match msg with
       | .Request v =>
@@ -134,23 +157,25 @@ theorem deliver_rid (n : Node) (j : Rid) (msg : Msg) :
       | .Accept v => onAcceptS n (rid j) v
       | .Accepted v => onAcceptedS n (rid j) v
       | .Nack _ q => if n.max_seen < q then (.None, { n with max_seen := q }) else (.None, n) := by
-  unfold deliverS; rw [if_neg (by simp)]; cases msg <;> rfl
+  unfold deliverS
+  rw [if_neg (by rw [hn, u8_val, rid_val]; exact Nat.not_le.mpr j.isLt)]
+  cases msg <;> rfl
 
-theorem owner_of (b : U64) (j : Rid) (h : b.val % 3 = j.val) : owner b = j := Fin.ext h
+theorem owner_of (b : U64) (j : Fin N) (h : b.val % N = j.val) : owner (N := N) b = j := Fin.ext h
 
-theorem good_request (w : World) (inv : Inv w) (i : Rid) (p : Packet) (hp : w.net p) (v : U64)
-    (hm : p.send.msg = .Request v) :
+theorem good_request (w : World N) (inv : Inv w) (i : Fin N) (p : Packet N) (hp : w.net p)
+    (v : U64) (hm : p.send.msg = .Request v) :
     Good w (w.after i (deliverS (w.node i) (rid p.src) (.Request v))) := by
   have old := inv.1 i
-  rw [deliver_rid]
+  rw [deliver_rid _ old.size]
   cases hv : (w.node i).value
   · simp only []
     have g : Grows (w.node i) { w.node i with value := .Some v } :=
-      grows_of rfl rfl (le_refl _) (le_refl _) (fun _ e => by rw [hv] at e; cases e) rfl
-        (fun _ e => e) (fun _ vt e => ⟨vt, by simpa [vslot] using e, le_refl _⟩) (fun _ e => e)
+      grows_of rfl rfl rfl (le_refl _) (le_refl _) (fun _ e => by rw [hv] at e; cases e) rfl
+        rfl rfl (fun _ e => e)
     have tg := top_grows w i (.None, { w.node i with value := .Some v }) g
     refine ⟨inv_after w inv i _ _ g ?_ (fun s e => by cases e), ?_⟩
-    · apply old.congr (net_grows w i _) tg <;> simp only [after_self]
+    · apply old.congr (net_grows w i _) <;> simp only [after_self]
       · simp
       · intro x e; simp only [Option.some.injEq] at e; subst e; exact ⟨p, .inl hp, hm⟩
       · exact le_trans old.promised_top tg
@@ -159,21 +184,20 @@ theorem good_request (w : World) (inv : Inv w) (i : Rid) (p : Packet) (hp : w.ne
       exact .idle
   · exact good_noop w inv i
 
-theorem good_nack (w : World) (inv : Inv w) (i : Rid) (p : Packet) (hp : w.net p) (x q : U64)
-    (hm : p.send.msg = .Nack x q) :
+theorem good_nack (w : World N) (inv : Inv w) (i : Fin N) (p : Packet N) (hp : w.net p)
+    (x q : U64) (hm : p.send.msg = .Nack x q) :
     Good w (w.after i (deliverS (w.node i) (rid p.src) (.Nack x q))) := by
   have old := inv.1 i
   have hq : q.val ≤ top w := by have := inv.2 p hp; simp only [PacketInv, hm] at this; exact this
-  rw [deliver_rid]
+  rw [deliver_rid _ old.size]
   simp only []
   split
   · rename_i hlt; rw [UScalar.lt_equiv] at hlt
     have g : Grows (w.node i) { w.node i with max_seen := q } :=
-      grows_of rfl rfl (le_refl _) (by simp; omega) (fun _ e => e) rfl
-        (fun _ e => e) (fun _ vt e => ⟨vt, by simpa [vslot] using e, le_refl _⟩) (fun _ e => e)
+      grows_of rfl rfl rfl (le_refl _) (by simp; omega) (fun _ e => e) rfl rfl rfl (fun _ e => e)
     have tg := top_grows w i (.None, { w.node i with max_seen := q }) g
     refine ⟨inv_after w inv i _ _ g ?_ (fun s e => by cases e), ?_⟩
-    · apply old.congr (net_grows w i _) tg <;> simp only [after_self]
+    · apply old.congr (net_grows w i _) <;> simp only [after_self]
       · exact id
       · intro x e; obtain ⟨p, hp, h⟩ := old.request x e; exact ⟨p, .inl hp, h⟩
       · exact le_trans old.promised_top tg
@@ -182,38 +206,37 @@ theorem good_nack (w : World) (inv : Inv w) (i : Rid) (p : Packet) (hp : w.net p
       exact .idle
   · exact good_noop w inv i
 
-theorem good_prepare (w : World) (inv : Inv w) (i : Rid) (p : Packet) (hp : w.net p) (b : U64)
-    (hm : p.send.msg = .Prepare b) :
+theorem good_prepare (w : World N) (inv : Inv w) (i : Fin N) (p : Packet N) (hp : w.net p)
+    (b : U64) (hm : p.send.msg = .Prepare b) :
     Good w (w.after i (deliverS (w.node i) (rid p.src) (.Prepare b))) := by
   have old := inv.1 i
   have pk := inv.2 p hp
   simp only [PacketInv, hm] at pk
   obtain ⟨_, hmod, hle⟩ := pk
   have hbt : b.val ≤ top w := le_trans hle (le_top w _)
-  rw [deliver_rid]
+  rw [deliver_rid _ old.size]
   simp only [onPrepareS]
   split
   · rename_i hlt; rw [UScalar.lt_equiv] at hlt
     have g : Grows (w.node i) { w.node i with promised := b } :=
-      grows_of rfl rfl (by simp; omega) (le_refl _) (fun _ e => e) rfl
-        (fun _ e => e) (fun _ vt e => ⟨vt, by simpa [vslot] using e, le_refl _⟩) (fun _ e => e)
+      grows_of rfl rfl rfl (by simp; omega) (le_refl _) (fun _ e => e) rfl rfl rfl (fun _ e => e)
     have tg := top_grows w i (.Some ⟨.To (rid p.src), .Promise b (w.node i).accepted⟩,
       { w.node i with promised := b }) g
     refine ⟨inv_after w inv i _ _ g ?_ ?_, ?_⟩
-    · apply old.congr (net_grows w i _) tg <;> simp only [after_self]
+    · apply old.congr (net_grows w i _) <;> simp only [after_self]
       · exact id
       · intro x e; obtain ⟨p, hp, h⟩ := old.request x e; exact ⟨p, .inl hp, h⟩
       · exact le_trans hbt tg
       · exact le_trans old.seen_top tg
     · intro s e; cases e; simp only [PacketInv, owner_of b p.src hmod]
-    · obtain ⟨e1, e2, e3, e4, e5⟩ := abs_after w i (.Some ⟨.To (rid p.src), .Promise b (w.node i).accepted⟩)
-        { w.node i with promised := b }
+    · obtain ⟨e1, e2, e3, e4, e5⟩ := abs_after w i
+        (.Some ⟨.To (rid p.src), .Promise b (w.node i).accepted⟩) { w.node i with promised := b }
       have : abs (w.after i (.Some ⟨.To (rid p.src), .Promise b (w.node i).accepted⟩,
-          { w.node i with promised := b })) = Paxos.prepare (abs w) i b.val := by
+          { w.node i with promised := b })) = PaxosN.prepare (abs w) i b.val := by
         apply state_ext
         · intro a; rw [e1]; rfl
-        · intro a; rw [e2]; simp [Paxos.prepare, Paxos.put, abs]; intro h; subst h; rfl
-        · intro a c x; rw [e3]; simp only [Paxos.prepare]
+        · intro a; rw [e2]; simp [PaxosN.prepare, PaxosN.put, abs]; intro h; subst h; rfl
+        · intro a c x; rw [e3]; simp only [PaxosN.prepare]
           apply or_congr_right
           constructor
           · rintro ⟨s, hs, rfl, y, z, hmsg, hy, hz⟩
@@ -221,47 +244,47 @@ theorem good_prepare (w : World) (inv : Inv w) (i : Rid) (p : Packet) (hp : w.ne
             exact ⟨rfl, hy.symm, by rw [← hz]; rfl⟩
           · rintro ⟨rfl, rfl, rfl⟩
             exact ⟨_, rfl, rfl, b, (w.node a).accepted, rfl, rfl, rfl⟩
-        · intro c v; rw [e4]; simp [Paxos.prepare]
-        · intro a c v; rw [e5]; simp [Paxos.prepare]
+        · intro c v; rw [e4]; simp [PaxosN.prepare]
+        · intro a c v; rw [e5]; simp [PaxosN.prepare]
       rw [this]
       exact .prepare i b.val (by simpa [abs] using hlt)
   · have hq : (w.node i).promised.val ≤ top w := old.promised_top
     exact good_hidden w inv i _ trivial (by
       simp only [PacketInv]; exact le_trans hq (top_grows w i _ (Grows.refl _)))
 
-theorem good_accept (w : World) (inv : Inv w) (i : Rid) (p : Packet) (hp : w.net p) (vt : Vote)
-    (hm : p.send.msg = .Accept vt) :
+theorem good_accept (w : World N) (inv : Inv w) (i : Fin N) (p : Packet N) (hp : w.net p)
+    (vt : Vote) (hm : p.send.msg = .Accept vt) :
     Good w (w.after i (deliverS (w.node i) (rid p.src) (.Accept vt))) := by
   have old := inv.1 i
   have pk := inv.2 p hp
   simp only [PacketInv, hm] at pk
   obtain ⟨_, _, hle, _, _⟩ := pk
   have hbt : vt.ballot.val ≤ top w := le_trans hle (le_top w _)
-  rw [deliver_rid]
+  rw [deliver_rid _ old.size]
   simp only [onAcceptS]
   split
   · rename_i hlt; rw [UScalar.le_equiv] at hlt
     let n' : Node := { w.node i with promised := vt.ballot, accepted := .Some vt }
     have g : Grows (w.node i) n' :=
-      grows_of rfl rfl (by simp [n']; omega) (le_refl _) (fun _ e => e) rfl
-        (fun _ e => e) (fun _ v e => ⟨v, by simpa [vslot, n'] using e, le_refl _⟩) (fun _ e => e)
+      grows_of rfl rfl rfl (by simp [n']; omega) (le_refl _) (fun _ e => e) rfl rfl rfl
+        (fun _ e => e)
     have tg := top_grows w i (.Some ⟨.All, .Accepted vt⟩, n') g
     refine ⟨inv_after w inv i _ _ g ?_ ?_, ?_⟩
-    · apply old.congr (net_grows w i _) tg <;> simp only [after_self, n']
+    · apply old.congr (net_grows w i _) <;> simp only [after_self]
       · exact id
       · intro x e; obtain ⟨p, hp, h⟩ := old.request x e; exact ⟨p, .inl hp, h⟩
       · exact le_trans hbt tg
       · exact le_trans old.seen_top tg
-    · intro s e; cases e; simp [PacketInv, n']
+    · intro s e; cases e; simp [PacketInv]
     · obtain ⟨e1, e2, e3, e4, e5⟩ := abs_after w i (.Some ⟨.All, .Accepted vt⟩) n'
       have : abs (w.after i (.Some ⟨.All, .Accepted vt⟩, n')) =
-          Paxos.cast (abs w) i vt.ballot.val vt.value.val := by
+          PaxosN.cast (abs w) i vt.ballot.val vt.value.val := by
         apply state_ext
         · intro a; rw [e1]; rfl
         · intro a; rw [e2]; rfl
-        · intro a c x; rw [e3]; simp [Paxos.cast]
-        · intro c v; rw [e4]; simp [Paxos.cast]
-        · intro a c v; rw [e5]; simp only [Paxos.cast]
+        · intro a c x; rw [e3]; simp [PaxosN.cast]
+        · intro c v; rw [e4]; simp [PaxosN.cast]
+        · intro a c v; rw [e5]; simp only [PaxosN.cast]
           apply or_congr_right
           constructor
           · rintro ⟨s, hs, rfl, v', hmsg, hb, hv⟩
@@ -275,90 +298,108 @@ theorem good_accept (w : World) (inv : Inv w) (i : Rid) (p : Packet) (hp : w.net
     exact good_hidden w inv i _ trivial (by
       simp only [PacketInv]; exact le_trans hq (top_grows w i _ (Grows.refl _)))
 
-/-- Learner updates change only the vote slots and the decision. -/
-theorem good_learner (w : World) (inv : Inv w) (i : Rid) (n' : Node) (g : Grows (w.node i) n')
+/-- Learner updates change only the vote vector and the decision. -/
+theorem good_learner (w : World N) (inv : Inv w) (i : Fin N) (n' : Node)
+    (g : Grows (w.node i) n')
     (b1 : n'.ballot = (w.node i).ballot) (b2 : n'.proposal = (w.node i).proposal)
     (b3 : n'.value = (w.node i).value) (b4 : n'.id = (w.node i).id)
     (b5 : n'.promised = (w.node i).promised) (b6 : n'.accepted = (w.node i).accepted)
-    (b7 : n'.max_seen = (w.node i).max_seen) (b8 : n'.promise0 = (w.node i).promise0)
-    (b9 : n'.promise1 = (w.node i).promise1) (b10 : n'.promise2 = (w.node i).promise2)
-    (votes : ∀ j x, vslot n' j = .Some x → ∃ q, w.net q ∧ q.src = j ∧ q.send.msg = .Accepted x)
-    (und : n'.decided = .None → agreedS n'.vote0 n'.vote1 n'.vote2 = .None)
+    (b7 : n'.max_seen = (w.node i).max_seen) (b8 : n'.promises = (w.node i).promises)
+    (b9 : n'.n = (w.node i).n) (vlen : (items n'.votes).length = N)
+    (votes : ∀ (j : Fin N) x, vslot n' j = .Some x →
+      ∃ q, w.net q ∧ q.src = j ∧ q.send.msg = .Accepted x)
+    (und : n'.decided = .None → ∀ v, ¬ Majority (countVotesS (items n'.votes) v) n'.n)
     (dec : ∀ x, n'.decided = .Some x →
-      ∃ (q : Paxos.Quorum) (c : Nat), ∀ a, Paxos.Member a q → (abs w).votes a c x.val) :
+      ∃ (q : Finset (Fin N)) (c : Nat), PaxosN.IsQuorum N q ∧ ∀ a ∈ q, (abs w).votes a c x.val) :
     Good w (w.after i (.None, n')) := by
   have old := inv.1 i
   have tg := top_grows w i (.None, n') g
+  have eps : ∀ j : Fin N, pslot n' j = pslot (w.node i) j := by intro j; simp [pslot, b8]
   refine ⟨inv_after w inv i _ _ g ?_ (fun s e => by cases e), ?_⟩
-  · refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp only [after_self]
+  · refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+      simp only [after_self]
     · rw [b4]; exact old.id
+    · rw [b9]; exact old.size
+    · rw [b8]; exact old.plen
+    · exact vlen
     · rw [b1]; exact old.own
     · rw [b1, b3]; intro hb; exact ⟨(old.started hb).1, .inl (old.started hb).2⟩
     · rw [b1, b2]; intro v h; exact ⟨(old.proposed v h).1, .inl (old.proposed v h).2⟩
-    · intro j y h
-      have : pslot n' j = pslot (w.node i) j := by simp [pslot, b8, b9, b10]
-      rw [this] at h; rw [b1]
-      obtain ⟨q, hq, rest⟩ := old.slots j y h; exact ⟨q, .inl hq, rest⟩
-    · rw [b2, b8, b9, b10]; exact old.pending
+    · intro j y h; rw [eps] at h; rw [b1]; exact old.slot_le j y h
+    · intro j y h hy; rw [eps] at h; rw [b1] at hy
+      obtain ⟨q, hq, rest⟩ := old.slots j y h hy; exact ⟨q, .inl hq, rest⟩
+    · rw [b2, b8, b1, b9]; exact old.pending
     · rw [b5]; exact le_trans old.promised_top tg
     · rw [b7]; exact le_trans old.seen_top tg
     · rw [b3]; intro v h; obtain ⟨q, hq, rest⟩ := old.request v h; exact ⟨q, .inl hq, rest⟩
     · intro j x h; obtain ⟨q, hq, rest⟩ := votes j x h; exact ⟨q, .inl hq, rest⟩
     · exact und
     · intro x h
-      obtain ⟨q, c, hq⟩ := dec x h
-      exact ⟨q, c, fun a ha => abs_votes_grow w i _ (hq a ha)⟩
+      obtain ⟨q, c, hq, hm⟩ := dec x h
+      exact ⟨q, c, hq, fun a ha => abs_votes_grow w i _ (hm a ha)⟩
   · rw [abs_hidden w i .None n' b5 b6 (fun s e => by cases e)]; exact .idle
 
-theorem good_accepted (w : World) (inv : Inv w) (i : Rid) (p : Packet) (hp : w.net p) (vt : Vote)
-    (hm : p.send.msg = .Accepted vt) :
+theorem majority_mono {a b : Nat} (n : U8) (h : a ≤ b) (hb : ¬ Majority b n) : ¬ Majority a n := by
+  unfold Majority at *; omega
+
+theorem good_accepted (w : World N) (inv : Inv w) (i : Fin N) (p : Packet N) (hp : w.net p)
+    (vt : Vote) (hm : p.send.msg = .Accepted vt) :
     Good w (w.after i (deliverS (w.node i) (rid p.src) (.Accepted vt))) := by
   have old := inv.1 i
-  rw [deliver_rid]
-  have hs : (rid p.src).val < 3 := by simp
-  have g := accepted_grows (w.node i) (rid p.src) vt hs
-  simp only [onAcceptedS] at g ⊢
-  generalize hmdef : (if newer (voteAt (w.node i) (rid p.src)) vt = true then
-    setVote (w.node i) (rid p.src) vt else w.node i) = m at g ⊢
-  obtain ⟨f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11⟩ :
-      m.ballot = (w.node i).ballot ∧ m.proposal = (w.node i).proposal ∧
-      m.value = (w.node i).value ∧ m.id = (w.node i).id ∧
-      m.promised = (w.node i).promised ∧ m.accepted = (w.node i).accepted ∧
-      m.max_seen = (w.node i).max_seen ∧ m.promise0 = (w.node i).promise0 ∧
-      m.promise1 = (w.node i).promise1 ∧ m.promise2 = (w.node i).promise2 ∧
-      m.decided = (w.node i).decided := by
-    rw [← hmdef]; split
-    · exact setVote_fields _ _ _
-    · simp
-  have mvotes : ∀ j x, vslot m j = .Some x → ∃ q, w.net q ∧ q.src = j ∧ q.send.msg = .Accepted x := by
+  have hs : (rid p.src).val < (items (w.node i).votes).length := by
+    rw [old.vlen, rid_val]; exact p.src.isLt
+  have g := accepted_grows (w.node i) (rid p.src) vt
+  rw [deliver_rid _ old.size]
+  simp only []
+  rw [accepted_eq _ _ _ hs] at g ⊢
+  have llen : (items (learnS (w.node i) (rid p.src) vt)).length = N := by
+    rw [learn_length]; exact old.vlen
+  have mvotes : ∀ (j : Fin N) x, slot (learnS (w.node i) (rid p.src) vt) j.val = .Some x →
+      ∃ q, w.net q ∧ q.src = j ∧ q.send.msg = .Accepted x := by
     intro j x h
-    rw [← hmdef] at h; split at h
-    · rw [vslot_set _ _ _ _ hs] at h; split at h
-      · rename_i hj; simp only [Option.some.injEq] at h; subst h
-        exact ⟨p, hp, Fin.ext (by simpa using hj.symm), hm⟩
-      · exact old.votes j x h
+    rw [learn_slot _ _ _ hs] at h
+    split at h
+    · rename_i hj; simp only [Option.some.injEq] at h; subst h
+      exact ⟨p, hp, Fin.ext (by rw [hj.2, rid_val]), hm⟩
     · exact old.votes j x h
+  have lle : ∀ v', v' ≠ vt → countVotesS (items (learnS (w.node i) (rid p.src) vt)) v' ≤
+      countVotesS (items (w.node i).votes) v' := fun v' hv => count_learn_le _ _ _ _ hv hs
+  generalize learnS (w.node i) (rid p.src) vt = L at g llen mvotes lle ⊢
   cases hd : (w.node i).decided
   · simp only [hd] at g ⊢
-    refine good_learner w inv i _ g f1 f2 f3 f4 f5 f6 f7 f8 f9 f10
-      (fun j x h => mvotes j x (by simpa [vslot] using h)) (fun h => by simpa using h) ?_
-    intro x h
-    obtain ⟨q, y, h1, h2, hx⟩ := agreedS_spec m x (by simpa using h)
-    refine ⟨q, y.ballot.val, fun a ha => ?_⟩
-    have hy : vslot m a = .Some y := by rcases ha with rfl | rfl <;> assumption
-    obtain ⟨pk, hpk, hsrc, hmsg⟩ := mvotes a y hy
-    exact ⟨pk, hpk, hsrc, y, hmsg, rfl, by rw [hx]⟩
+    by_cases hmaj : Majority (countVotesS (items L) vt) (w.node i).n
+    · rw [if_pos hmaj] at g ⊢
+      refine good_learner w inv i _ g rfl rfl rfl rfl rfl rfl rfl rfl rfl llen
+        (fun j x h => mvotes j x h) (fun h => by cases h) ?_
+      intro x h
+      simp only [Option.some.injEq] at h; subst h
+      have hq : PaxosN.IsQuorum N (voters (N := N) { w.node i with votes := L } vt) := by
+        have := (majority_iff _).mp (by rw [← old.size]; exact hmaj)
+        rw [count_votes_card { w.node i with votes := L } llen] at this
+        exact this
+      refine ⟨_, vt.ballot.val, hq, fun a ha => ?_⟩
+      obtain ⟨y, hy, hyb, hyv⟩ := (mem_voters _ vt a).mp ha
+      obtain ⟨pk, hpk, hsrc, hmsg⟩ := mvotes a y hy
+      exact ⟨pk, hpk, hsrc, y, hmsg, by rw [hyb], by rw [hyv]⟩
+    · rw [if_neg hmaj] at g ⊢
+      refine good_learner w inv i _ g rfl rfl rfl rfl rfl rfl rfl rfl rfl llen
+        (fun j x h => mvotes j x h) ?_ (fun x h => by cases h)
+      intro _ v'
+      by_cases hv : v' = vt
+      · subst hv; exact hmaj
+      · exact majority_mono _ (lle v' hv) (old.undecided hd v')
   · simp only [hd] at g ⊢
-    refine good_learner w inv i _ g f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 mvotes
-      (fun h => by rw [f11, hd] at h; cases h) ?_
-    intro x h; rw [f11] at h; exact old.decided x h
+    refine good_learner w inv i _ g rfl rfl rfl rfl rfl rfl rfl rfl rfl llen
+      (fun j x h => mvotes j x h) (fun h => by cases h) ?_
+    intro x h; exact old.decided x (by rw [hd]; exact h)
 
-theorem put_same (f : Rid → α) (a : Rid) : Paxos.put f a (f a) = f := by
-  funext i; by_cases hi : i = a <;> simp [Paxos.put, hi]
+theorem put_same {α : Type} (f : Fin N → α) (a : Fin N) : PaxosN.put f a (f a) = f := by
+  funext i; by_cases hi : i = a <;> simp [PaxosN.put, hi]
 
 /-- A value reported in a promise snapshot was proposed, hence requested by a client. -/
-theorem request_of_snapshot (w : World) (inv : Inv w) (ainv : Paxos.Invariant (abs w))
-    (pk : Packet) (hpk : w.net pk) (c : U64) (a : Vote) (hm : pk.send.msg = .Promise c (.Some a)) :
+theorem request_of_snapshot (w : World N) (inv : Inv w) (ainv : PaxosN.Invariant (abs w))
+    (pk : Packet N) (hpk : w.net pk) (c : U64) (a : Vote)
+    (hm : pk.send.msg = .Promise c (.Some a)) :
     ∃ q, w.net q ∧ q.send.msg = .Request a.value := by
   have hpr : (abs w).promises pk.src c.val (some (a.ballot.val, a.value.val)) :=
     ⟨pk, hpk, rfl, c, .Some a, hm, rfl, rfl⟩
@@ -371,142 +412,246 @@ theorem request_of_snapshot (w : World) (inv : Inv w) (ainv : Paxos.Invariant (a
   have : vt.value = a.value := UScalar.eq_of_val_eq hval
   exact ⟨q, hq, this ▸ hr⟩
 
-theorem good_promise (w : World) (inv : Inv w) (ainv : Paxos.Invariant (abs w)) (i : Rid)
-    (p : Packet) (hp : w.net p) (b : U64) (acc : Opt Vote) (hm : p.send.msg = .Promise b acc) :
-    Good w (w.after i (deliverS (w.node i) (rid p.src) (.Promise b acc))) := by
+/-- The abstract snapshot carried by the promise a replica recorded for acceptor `j`. -/
+def snapAt (n : Node) (j : Fin N) : Option PaxosN.Vote :=
+  match pslot n j with
+  | .Some p => snap p.accepted
+  | .None => none
+
+theorem getElem?_of_slot {α : Type} (s : RVec (Opt α)) (j : Nat) (x : α)
+    (h : slot s j = .Some x) : (items s)[j]? = some (.Some x) := by
+  unfold slot at h
+  cases e : (items s)[j]? with
+  | none => rw [e] at h; cases h
+  | some y => rw [e] at h; simp only [Option.getD_some] at h; rw [h]
+
+/-- Phase 2 start: a majority of promises for the current ballot has been
+    recorded, and the replica proposes `x` (chosen as `SelectOK` requires). -/
+theorem good_propose (w : World N) (inv : Inv w) (i : Fin N) (ps : RVec (Opt Promise)) (x : U64)
+    (hpr : (w.node i).proposal = .None) (hb0 : (w.node i).ballot.val ≠ 0)
+    (base : Grows (w.node i) { w.node i with promises := ps })
+    (mslot_le : ∀ (j : Fin N) pr, slot ps j.val = .Some pr →
+      0 < pr.ballot.val ∧ pr.ballot.val ≤ (w.node i).ballot.val)
+    (mslots : ∀ (j : Fin N) pr, slot ps j.val = .Some pr → pr.ballot = (w.node i).ballot →
+      ∃ q, w.net q ∧ q.src = j ∧ q.send.msg = .Promise pr.ballot pr.accepted)
+    (hmaj : Majority (countPromisesS (items ps) (w.node i).ballot) (w.node i).n)
+    (hsel : PaxosN.SelectOK (promisers (N := N) { w.node i with promises := ps } (w.node i).ballot)
+      (snapAt { w.node i with promises := ps }) x.val)
+    (hreq : ∃ q, w.net q ∧ q.send.msg = .Request x) :
+    Good w (w.after i (.Some ⟨.All, .Accept ⟨(w.node i).ballot, x⟩⟩,
+      { w.node i with proposal := .Some x, promises := ps })) := by
   have old := inv.1 i
-  have hs : (rid p.src).val < 3 := by simp
-  have g := promise_grows (w.node i) (rid p.src) b acc hs
-  rw [deliver_rid]
-  simp only [onPromiseS] at g ⊢
-  by_cases h1 : b ≠ (w.node i).ballot
-  · rw [if_pos h1]; exact good_noop w inv i
-  rw [if_neg h1] at g ⊢
-  have h1 : b = (w.node i).ballot := not_not.mp h1
-  by_cases h2 : b = 0#u64
-  · rw [if_pos h2]; exact good_noop w inv i
-  rw [if_neg h2] at g ⊢
-  have hb0 : (w.node i).ballot.val ≠ 0 := by
-    rw [← h1]; intro e; exact h2 (UScalar.eq_of_val_eq (by simpa using e))
-  rcases hpr : (w.node i).proposal with _ | x
-  rotate_left
-  · exact good_noop w inv i
-  simp only [hpr] at g ⊢
-  have mslots : ∀ j y, pslot (recordS (w.node i) (rid p.src) acc) j = .Some y →
-      ∃ q, w.net q ∧ q.src = j ∧ q.send.msg = .Promise (w.node i).ballot y := by
-    intro j y h
-    rw [pslot_record _ _ _ _ hs] at h
-    split at h
-    · rename_i hj; simp only [Option.some.injEq] at h; subst h
-      exact ⟨p, hp, Fin.ext (by simpa using hj.symm), by rw [hm, h1]⟩
-    · exact old.slots j y h
-  obtain ⟨e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11⟩ := record_fields (w.node i) (rid p.src) acc
-  generalize recordS (w.node i) (rid p.src) acc = m at *
-  have own : (w.node i).ballot.val % 3 = i.val := old.own.resolve_left hb0
-  rcases hv : (w.node i).value with _ | v
-  · exact absurd hv (old.started hb0).1
-  simp only [hv] at g ⊢
-  have mvotes : ∀ j, vslot m j = vslot (w.node i) j := by intro j; simp [vslot, e8, e9, e10]
-  rcases hq : quorumS m.promise0 m.promise1 m.promise2 with _ | ⟨l, r⟩
-  · simp only [hq] at g ⊢
-    have tg := top_grows w i (.None, m) g
-    refine ⟨inv_after w inv i _ _ g ?_ (fun s e => by cases e), ?_⟩
-    · refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp only [after_self]
-      · rw [e4]; exact old.id
-      · rw [e1]; exact old.own
-      · rw [e1, e3]; intro hb; exact ⟨(old.started hb).1, .inl (old.started hb).2⟩
-      · rw [e2, hpr]; intro v h; cases h
-      · intro j y h; rw [e1]; obtain ⟨q, hq', rest⟩ := mslots j y h; exact ⟨q, .inl hq', rest⟩
-      · intro _; exact hq
-      · rw [e5]; exact le_trans old.promised_top tg
-      · rw [e7]; exact le_trans old.seen_top tg
-      · rw [e3]; intro v h; obtain ⟨q, hq', rest⟩ := old.request v h; exact ⟨q, .inl hq', rest⟩
-      · intro j x h; rw [mvotes] at h
-        obtain ⟨q, hq', rest⟩ := old.votes j x h; exact ⟨q, .inl hq', rest⟩
-      · rw [e11, e8, e9, e10]; exact old.undecided
-      · rw [e11]; intro x h
-        obtain ⟨q, c, hq'⟩ := old.decided x h
-        exact ⟨q, c, fun a ha => abs_votes_grow w i _ (hq' a ha)⟩
-    · rw [abs_hidden w i .None m e5 e6 (fun s e => by cases e)]; exact .idle
-  simp only [hq] at g ⊢
-  obtain ⟨q, hql, hqr⟩ := quorumS_spec m l r hq
-  generalize hx : selectS l r v = x at g ⊢
-  have tg := top_grows w i (.Some ⟨.All, .Accept ⟨b, x⟩⟩, { m with proposal := .Some x }) g
+  have own : (w.node i).ballot.val % N = i.val := old.own.resolve_left hb0
+  have plen : (items ps).length = N := base.plen.trans old.plen
+  have g : Grows (w.node i) { w.node i with proposal := .Some x, promises := ps } :=
+    ⟨rfl, rfl, base.plen, rfl, le_refl _, le_refl _, le_refl _, fun _ h => h,
+      fun _ v h => (by rw [hpr] at h; cases h), base.slot, base.vote, fun _ h => h⟩
+  have tg := top_grows w i (.Some ⟨.All, .Accept ⟨(w.node i).ballot, x⟩⟩,
+    { w.node i with proposal := .Some x, promises := ps }) g
   refine ⟨inv_after w inv i _ _ g ?_ ?_, ?_⟩
-  · refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp only [after_self]
-    · rw [e4]; exact old.id
-    · rw [e1]; exact old.own
-    · rw [e1, e3]; intro hb; exact ⟨(old.started hb).1, .inl (old.started hb).2⟩
-    · intro v' h; simp only [Option.some.injEq] at h; subst h
-      rw [e1]; exact ⟨hb0, by rw [← h1]; exact sent_new _ _ _ _⟩
-    · intro j y h
-      have : pslot { m with proposal := .Some x } j = pslot m j := by simp [pslot]
-      rw [this] at h; rw [e1]; obtain ⟨q, hq', rest⟩ := mslots j y h; exact ⟨q, .inl hq', rest⟩
+  · refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+      simp only [after_self]
+    · exact old.id
+    · exact old.size
+    · exact plen
+    · exact old.vlen
+    · exact old.own
+    · intro hb; exact ⟨(old.started hb).1, .inl (old.started hb).2⟩
+    · intro v' h; simp only [Option.some.injEq] at h; subst h; exact ⟨hb0, sent_new _ _ _ _⟩
+    · intro j y h; exact mslot_le j y h
+    · intro j y h hy; obtain ⟨q, hq, rest⟩ := mslots j y h hy; exact ⟨q, .inl hq, rest⟩
     · intro h; cases h
-    · have := old.promised_top; rw [← e5] at this; exact le_trans this tg
-    · have := old.seen_top; rw [← e7] at this; exact le_trans this tg
-    · rw [e3]; intro v h; obtain ⟨q, hq', rest⟩ := old.request v h; exact ⟨q, .inl hq', rest⟩
-    · intro j y h
-      have : vslot { m with proposal := .Some x } j = vslot m j := by simp [vslot]
-      rw [this, mvotes] at h
-      obtain ⟨q, hq', rest⟩ := old.votes j y h; exact ⟨q, .inl hq', rest⟩
-    · rw [e11, e8, e9, e10]; exact old.undecided
-    · rw [e11]; intro y h
-      obtain ⟨q, c, hq'⟩ := old.decided y h
-      exact ⟨q, c, fun a ha => abs_votes_grow w i _ (hq' a ha)⟩
+    · exact le_trans old.promised_top tg
+    · exact le_trans old.seen_top tg
+    · intro v h; obtain ⟨q, hq, rest⟩ := old.request v h; exact ⟨q, .inl hq, rest⟩
+    · intro j y h; obtain ⟨q, hq, rest⟩ := old.votes j y h; exact ⟨q, .inl hq, rest⟩
+    · exact old.undecided
+    · intro y h
+      obtain ⟨q, c, hq, hm'⟩ := old.decided y h
+      exact ⟨q, c, hq, fun a ha => abs_votes_grow w i _ (hm' a ha)⟩
   · intro s e; cases e
     simp only [PacketInv, after_self]
-    refine ⟨by rw [h1]; exact hb0, by rw [h1]; exact own, by rw [e1, h1], by simp, ?_⟩
-    rcases selectS_cases l r v with h | ⟨a, hl, h⟩ | ⟨a, hr, h⟩ <;> rw [hx] at h <;> subst h
-    · obtain ⟨pk, hpk, hmm⟩ := old.request _ hv; exact ⟨pk, .inl hpk, hmm⟩
-    · subst hl
-      obtain ⟨pk, hpk, _, hmsg⟩ := mslots q.first _ hql
-      obtain ⟨rq, hrq, hmr⟩ := request_of_snapshot w inv ainv pk hpk _ a hmsg
-      exact ⟨rq, .inl hrq, hmr⟩
-    · subst hr
-      obtain ⟨pk, hpk, _, hmsg⟩ := mslots q.second _ hqr
-      obtain ⟨rq, hrq, hmr⟩ := request_of_snapshot w inv ainv pk hpk _ a hmsg
-      exact ⟨rq, .inl hrq, hmr⟩
-  · have fresh : ∀ v', ¬ (abs w).proposals b.val v' := by
+    obtain ⟨q, hq, hmq⟩ := hreq
+    exact ⟨hb0, own, le_refl _, by simp, q, .inl hq, hmq⟩
+  · have fresh : ∀ v', ¬ (abs w).proposals (w.node i).ballot.val v' := by
       rintro v' ⟨pk, hpk, vt, hmsg, hb, _⟩
       have pi := inv.2 pk hpk
       simp only [PacketInv, hmsg] at pi
       obtain ⟨_, hmod, _, hprop, _⟩ := pi
-      have hsrc : pk.src = i := Fin.ext (by rw [← hmod, ← own, hb, h1])
+      have hsrc : pk.src = i := Fin.ext (by rw [← hmod, ← own, hb])
       rw [hsrc] at hprop
-      have heq : vt.ballot = (w.node i).ballot := UScalar.eq_of_val_eq (by rw [hb, h1])
+      have heq : vt.ballot = (w.node i).ballot := UScalar.eq_of_val_eq hb
       rw [hprop heq] at hpr; cases hpr
-    have hl' : (abs w).promises q.first b.val (snap l) := by
-      obtain ⟨pk, hpk, hsrc, hmsg⟩ := mslots q.first l hql
-      exact ⟨pk, hpk, hsrc, _, l, hmsg, by rw [h1], rfl⟩
-    have hr' : (abs w).promises q.second b.val (snap r) := by
-      obtain ⟨pk, hpk, hsrc, hmsg⟩ := mslots q.second r hqr
-      exact ⟨pk, hpk, hsrc, _, r, hmsg, by rw [h1], rfl⟩
-    obtain ⟨a1, a2, a3, a4, a5⟩ := abs_after w i (.Some ⟨.All, .Accept ⟨b, x⟩⟩) { m with proposal := .Some x }
-    have heq : abs (w.after i (.Some ⟨.All, .Accept ⟨b, x⟩⟩, { m with proposal := .Some x })) =
-        Paxos.propose (abs w) b.val (Paxos.select (snap l) (snap r) v.val) := by
+    have hq : PaxosN.IsQuorum N
+        (promisers (N := N) { w.node i with promises := ps } (w.node i).ballot) := by
+      have := (majority_iff _).mp (by rw [← old.size]; exact hmaj)
+      rw [count_promises_card { w.node i with promises := ps } plen] at this
+      exact this
+    have hprom : ∀ a ∈ promisers (N := N) { w.node i with promises := ps } (w.node i).ballot,
+        (abs w).promises a (w.node i).ballot.val (snapAt { w.node i with promises := ps } a) := by
+      intro a ha
+      obtain ⟨pr, hpr', hb⟩ := (mem_promisers _ _ a).mp ha
+      obtain ⟨pk, hpk, hsrc, hmsg⟩ := mslots a pr hpr' hb
+      exact ⟨pk, hpk, hsrc, pr.ballot, pr.accepted, hmsg, by rw [hb], by simp [snapAt, hpr']⟩
+    obtain ⟨a1, a2, a3, a4, a5⟩ := abs_after w i (.Some ⟨.All, .Accept ⟨(w.node i).ballot, x⟩⟩)
+      { w.node i with proposal := .Some x, promises := ps }
+    have heq : abs (w.after i (.Some ⟨.All, .Accept ⟨(w.node i).ballot, x⟩⟩,
+        { w.node i with proposal := .Some x, promises := ps })) =
+        PaxosN.propose (abs w) (w.node i).ballot.val x.val := by
       apply state_ext
-      · intro a; rw [a1]; simp only [e5]
-        show Paxos.put (abs w).promised i ((abs w).promised i) a = _
+      · intro a; rw [a1]
+        show PaxosN.put (abs w).promised i ((abs w).promised i) a = _
         rw [put_same]; rfl
-      · intro a; rw [a2]; simp only [e6]
-        show Paxos.put (abs w).accepted i ((abs w).accepted i) a = _
+      · intro a; rw [a2]
+        show PaxosN.put (abs w).accepted i ((abs w).accepted i) a = _
         rw [put_same]; rfl
-      · intro a c y; rw [a3]; simp [Paxos.propose]
-      · intro c y; rw [a4]; simp only [Paxos.propose]
+      · intro a c y; rw [a3]; simp [PaxosN.propose]
+      · intro c y; rw [a4]; simp only [PaxosN.propose]
         apply or_congr_right
-        rw [← selectS_val, hx]
         constructor
         · rintro ⟨s, hs, vt, hmsg, hb, hv'⟩
           cases hs; simp only [Msg.Accept.injEq] at hmsg; subst hmsg
           exact ⟨hb.symm, hv'.symm⟩
-        · rintro ⟨rfl, rfl⟩; exact ⟨_, rfl, ⟨b, x⟩, rfl, rfl, rfl⟩
-      · intro a c y; rw [a5]; simp [Paxos.propose]
+        · rintro ⟨rfl, rfl⟩; exact ⟨_, rfl, ⟨_, x⟩, rfl, rfl, rfl⟩
+      · intro a c y; rw [a5]; simp [PaxosN.propose]
     rw [heq]
-    exact .propose b.val v.val q (snap l) (snap r) fresh hl' hr'
+    exact .propose _ _ _ hq _ fresh hprom hsel
+
+/-- The value a replica proposes after a promise majority: the value of the
+    highest reported vote, or its own client value. -/
+def chooseS (ps : List (Opt Promise)) (b : U64) (v : U64) : U64 :=
+  match highestS ps b with
+  | .None => v
+  | .Some m => m.value
+
+/-- `onPromiseS` for a promise for the current ballot at a replica with no
+    proposal yet and a client value. -/
+theorem promise_eq (n : Node) (src : U8) (acc : Opt Vote) (v : U64)
+    (hb0 : n.ballot ≠ 0#u64) (hpr : n.proposal = .None) (hv : n.value = .Some v)
+    (hs : src.val < (items n.promises).length) :
+    onPromiseS n src n.ballot acc =
+      if Majority (countPromisesS (items (setAt n.promises src.val (.Some ⟨n.ballot, acc⟩)))
+          n.ballot) n.n then
+        (.Some ⟨.All, .Accept ⟨n.ballot, chooseS (items (setAt n.promises src.val
+            (.Some ⟨n.ballot, acc⟩))) n.ballot v⟩⟩,
+          { n with proposal := .Some (chooseS (items (setAt n.promises src.val
+            (.Some ⟨n.ballot, acc⟩))) n.ballot v),
+                   promises := setAt n.promises src.val (.Some ⟨n.ballot, acc⟩) })
+      else (.None, { n with promises := setAt n.promises src.val (.Some ⟨n.ballot, acc⟩) }) := by
+  cases n
+  simp only at hb0 hpr hv hs ⊢
+  subst hpr hv
+  unfold onPromiseS
+  rw [if_neg (by simp), if_neg hb0]
+  simp only []
+  rw [if_neg (by omega)]
+  split
+  · unfold chooseS; split <;> (rename_i heq; rw [heq])
+  · rfl
+
+theorem good_promise (w : World N) (inv : Inv w) (ainv : PaxosN.Invariant (abs w)) (i : Fin N)
+    (p : Packet N) (hp : w.net p) (b : U64) (acc : Opt Vote) (hm : p.send.msg = .Promise b acc) :
+    Good w (w.after i (deliverS (w.node i) (rid p.src) (.Promise b acc))) := by
+  have old := inv.1 i
+  have hs : (rid p.src).val < (items (w.node i).promises).length := by
+    rw [old.plen, rid_val]; exact p.src.isLt
+  rw [deliver_rid _ old.size]
+  simp only []
+  by_cases h1 : b ≠ (w.node i).ballot
+  · unfold onPromiseS; rw [if_pos h1]; exact good_noop w inv i
+  have h1 : b = (w.node i).ballot := not_not.mp h1
+  subst h1
+  by_cases h2 : (w.node i).ballot = 0#u64
+  · unfold onPromiseS; rw [if_neg (by simp), if_pos h2]; exact good_noop w inv i
+  have hb0 : (w.node i).ballot.val ≠ 0 := fun e => h2 (UScalar.eq_of_val_eq (by simpa using e))
+  cases hpr : (w.node i).proposal with
+  | some x =>
+    unfold onPromiseS; rw [if_neg (by simp), if_neg h2]; simp only [hpr]
+    exact good_noop w inv i
+  | none =>
+  obtain ⟨v, hv⟩ : ∃ v, (w.node i).value = .Some v := by
+    cases h : (w.node i).value
+    · exact absurd h (old.started hb0).1
+    · exact ⟨_, rfl⟩
+  rw [promise_eq _ _ _ v h2 hpr hv hs]
+  have base := record_grows (w.node i) (rid p.src) acc hs
+  have mslot : ∀ j : Fin N, slot (setAt (w.node i).promises (rid p.src).val
+      (.Some ⟨(w.node i).ballot, acc⟩)) j.val =
+      if j = p.src then .Some ⟨(w.node i).ballot, acc⟩ else pslot (w.node i) j := by
+    intro j; rw [slot_setAt _ _ _ _ hs, rid_val]; simp only [Fin.val_inj]; rfl
+  have mslot_le : ∀ (j : Fin N) pr, slot (setAt (w.node i).promises (rid p.src).val
+      (.Some ⟨(w.node i).ballot, acc⟩)) j.val = .Some pr →
+      0 < pr.ballot.val ∧ pr.ballot.val ≤ (w.node i).ballot.val := by
+    intro j pr h; rw [mslot] at h; split at h
+    · simp only [Option.some.injEq] at h; subst h; exact ⟨by simp only []; omega, le_refl _⟩
+    · exact old.slot_le j pr h
+  have mslots : ∀ (j : Fin N) pr, slot (setAt (w.node i).promises (rid p.src).val
+      (.Some ⟨(w.node i).ballot, acc⟩)) j.val = .Some pr → pr.ballot = (w.node i).ballot →
+      ∃ q, w.net q ∧ q.src = j ∧ q.send.msg = .Promise pr.ballot pr.accepted := by
+    intro j pr h hb; rw [mslot] at h; split at h
+    · rename_i hj; simp only [Option.some.injEq] at h; subst h; subst hj; exact ⟨p, hp, rfl, hm⟩
+    · exact old.slots j pr h hb
+  generalize setAt (w.node i).promises (rid p.src).val (.Some ⟨(w.node i).ballot, acc⟩) = ps
+    at base mslot_le mslots ⊢
+  have plen : (items ps).length = N := base.plen.trans old.plen
+  by_cases hmaj : Majority (countPromisesS (items ps) (w.node i).ballot) (w.node i).n
+  · rw [if_pos hmaj]
+    rcases hh : highestS (items ps) (w.node i).ballot with _ | mm
+    · simp only [chooseS, hh]
+      refine good_propose w inv i ps v hpr hb0 base mslot_le mslots hmaj (.inl ?_) (old.request v hv)
+      intro a ha
+      obtain ⟨pr, hpr', hb⟩ := (mem_promisers _ _ a).mp ha
+      have := highestS_none _ _ hh a.val pr (getElem?_of_slot _ _ _ hpr') hb
+      simp [snapAt, hpr', this, snap]
+    · simp only [chooseS, hh]
+      obtain ⟨⟨idx, hidx⟩, hmax⟩ := highestS_some _ _ _ hh
+      have hlt : idx < (items ps).length := by
+        by_contra hc; rw [List.getElem?_eq_none (by omega)] at hidx; cases hidx
+      let a : Fin N := ⟨idx, plen ▸ hlt⟩
+      have hslot : pslot { w.node i with promises := ps } a =
+          .Some ⟨(w.node i).ballot, .Some mm⟩ := by
+        show slot ps idx = _; simp [slot, hidx]
+      obtain ⟨pk, hpk, _, hmsg⟩ := mslots a _ hslot rfl
+      obtain ⟨rq, hrq, hmr⟩ := request_of_snapshot w inv ainv pk hpk _ mm hmsg
+      refine good_propose w inv i ps mm.value hpr hb0 base mslot_le mslots hmaj
+        (.inr ⟨a, (mem_promisers _ _ a).mpr ⟨_, hslot, rfl⟩, (mm.ballot.val, mm.value.val),
+          by simp [snapAt, hslot, snap], rfl, ?_⟩) ⟨rq, hrq, hmr⟩
+      intro c hc m' hm'
+      obtain ⟨pr, hpr', hb⟩ := (mem_promisers _ _ c).mp hc
+      simp only [snapAt, hpr'] at hm'
+      cases hacc : pr.accepted with
+      | none => rw [hacc] at hm'; cases hm'
+      | some y =>
+        rw [hacc] at hm'; simp only [snap, Option.some.injEq] at hm'; subst hm'
+        exact hmax c.val pr y (getElem?_of_slot _ _ _ hpr') hb hacc
+  · rw [if_neg hmaj]
+    have tg := top_grows w i (.None, { w.node i with promises := ps }) base
+    refine ⟨inv_after w inv i _ _ base ?_ (fun s e => by cases e), ?_⟩
+    · refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+        simp only [after_self]
+      · exact old.id
+      · exact old.size
+      · exact plen
+      · exact old.vlen
+      · exact old.own
+      · intro hb; exact ⟨(old.started hb).1, .inl (old.started hb).2⟩
+      · intro v h; rw [hpr] at h; cases h
+      · exact mslot_le
+      · intro j y h hy; obtain ⟨q, hq, rest⟩ := mslots j y h hy; exact ⟨q, .inl hq, rest⟩
+      · intro _; exact hmaj
+      · exact le_trans old.promised_top tg
+      · exact le_trans old.seen_top tg
+      · intro v h; obtain ⟨q, hq, rest⟩ := old.request v h; exact ⟨q, .inl hq, rest⟩
+      · intro j x h; obtain ⟨q, hq, rest⟩ := old.votes j x h; exact ⟨q, .inl hq, rest⟩
+      · exact old.undecided
+      · intro y h
+        obtain ⟨q, c, hq, hm'⟩ := old.decided y h
+        exact ⟨q, c, hq, fun a ha => abs_votes_grow w i _ (hm' a ha)⟩
+    · rw [abs_hidden w i .None { w.node i with promises := ps } rfl rfl (fun s e => by cases e)]
+      exact .idle
 
 /-- Every permitted input preserves the invariant and refines one abstract step. -/
-theorem good_step (w : World) (inv : Inv w) (ainv : Paxos.Invariant (abs w)) (i : Rid)
+theorem good_step (w : World N) (inv : Inv w) (ainv : PaxosN.Invariant (abs w)) (i : Fin N)
     (inp : Input) (al : Allowed w i inp) : Good w (w.after i (handleS (w.node i) inp)) := by
   cases inp with
   | Submit v => exact good_submit w inv i v

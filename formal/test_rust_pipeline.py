@@ -92,13 +92,13 @@ class RustPipelineTests(unittest.TestCase):
         legacy = engine.load_request(engine.ROOT / 'formal/rust/requests-paxos.json')
         self.assertEqual([c['name'] for c in compile_request(legacy)['claims']], ['safety', 'liveness'])
 
-    def test_deployable_paxos_spec_separates_safety_from_liveness_assumptions(self):
+    def test_deployable_paxos_spec_quantifies_over_cluster_size(self):
         spec = engine.load_request(engine.discover_spec(engine.ROOT / 'formal/rust/paxosd'))
         claims = {c['name']: c for c in compile_request(spec)['claims']}
-        for name in ('agreement', 'validity'):
-            self.assertEqual(claims[name]['kind'], 'invariant')
+        for name in ('refinement', 'agreement', 'validity', 'eventual_decision', 'liveness', 'fairness_needed'):
+            self.assertIn('∀ (N : Nat) [PaxosSystem.Cluster N]', claims[name]['statement'])
             self.assertEqual(claims[name]['assumptions'], [])
-        self.assertEqual(claims['eventual_decision']['assumptions'], ['PaxosSystem.Live'])
+        self.assertIn('RMVerify.Spec.Invariant', claims['agreement']['statement'])
         self.assertIn('PaxosSystem.Fair run L Q T', claims['liveness']['statement'])
         self.assertIn('deployable_paxos.Node.handle', claims['no_panic']['statement'])
 
@@ -174,8 +174,9 @@ class RustPipelineTests(unittest.TestCase):
             mutant = engine.unpack(source, root / 'mutant')
             path = mutant / 'src/lib.rs'
             # A proposer that ignores the votes reported in promises is unsafe.
-            path.write_text(path.read_text().replace(
-                'let value = select(left, right, offered);', 'let value = offered;'))
+            text = path.read_text()
+            self.assertIn('Some(m) => m.value,', text)
+            path.write_text(text.replace('Some(m) => m.value,', 'Some(_) => offered,'))
             broken = engine.verify(mutant, None, root / 'evidence', timeout=900)
             self.assertEqual(broken['status'], 'unknown', broken)
             self.assertIn('Node.lean', (Path(broken['evidence']) / 'build.log').read_text())

@@ -1,61 +1,70 @@
 import UserVerification.Steps
 
-/- Safety of the deployed cluster: every reachable state of the three extracted
-   replicas and their network satisfies agreement and validity. No fairness,
-   timing, or delivery assumption is used. -/
+/- Safety of the deployed cluster of `N` replicas (`0 < N < 256`): every
+   reachable state of the `N` extracted replicas and their network satisfies
+   agreement and validity. No fairness, timing, or delivery assumption is used. -/
 namespace PaxosSystem
 open CoreModels Aeneas Aeneas.Std RustM deployable_paxos PaxosNode RMVerify
 
-theorem initial_inv (w : World) (h : Initial w) : Inv w := by
-  obtain ⟨hn, hnet⟩ := h
-  have node : ∀ k, w.node k = initS (rid k) := by
-    intro k; have := hn k; rw [new_eq] at this; simp only [ok.injEq] at this; exact this.symm
-  refine ⟨fun k => ?_, fun p hp => absurd hp (hnet p)⟩
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp [node, initS, pslot, vslot, quorumS, agreedS]
+variable {N : Nat}
 
-theorem initial_abs (w : World) (h : Initial w) : abs w = Paxos.initial := by
-  obtain ⟨hn, hnet⟩ := h
-  have node : ∀ k, w.node k = initS (rid k) := by
-    intro k; have := hn k; rw [new_eq] at this; simp only [ok.injEq] at this; exact this.symm
-  apply state_ext <;> simp [abs, Paxos.initial, node, initS, snap, hnet]
+theorem slot_replicate_none {α : Type} (k : Nat) (h : k ≤ Usize.max) (j : Nat) :
+    slot (replicate k (.None : Opt α) h) j = .None := by
+  unfold slot; rw [items_replicate, List.getElem?_replicate]; split <;> rfl
+
+theorem initial_node [Cluster N] (w : World N) (h : Initial w) (k : Fin N) :
+    w.node k = initS (rid k) (u8 N) := by
+  have := h.1 k; rw [new_eq] at this; simp only [ok.injEq] at this; exact this.symm
+
+theorem initial_inv [Cluster N] (w : World N) (h : Initial w) : Inv w := by
+  have node := initial_node w h
+  refine ⟨fun k => ?_, fun p hp => absurd hp (h.2 p)⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+    simp [node, initS, pslot, vslot, slot_replicate_none, items_replicate, countPromisesS,
+      countVotesS, promiseHit, voteHit, Majority, List.countP_replicate]
+
+theorem initial_abs [Cluster N] (w : World N) (h : Initial w) : abs w = PaxosN.initial N := by
+  have node := initial_node w h
+  apply state_ext <;> simp [abs, PaxosN.initial, node, initS, snap, h.2]
 
 /-- Joint induction: the concrete invariant holds and the interpretation is a
-    reachable state of the abstract Paxos model. -/
-theorem reachable_inv (w : World) (h : Reactive.Reachable module w) :
-    Inv w ∧ Reactive.Reachable Paxos.module (abs w) := by
+    reachable state of the abstract `N`-acceptor Paxos model. -/
+theorem reachable_inv [Cluster N] (w : World N) (h : Reactive.Reachable (module N) w) :
+    Inv w ∧ Reactive.Reachable (PaxosN.module N) (abs w) := by
   induction h with
   | @initial w h =>
     have h : Initial w := by simpa [module, Reactive.Module.initial] using h
     refine ⟨initial_inv w h, .initial ?_⟩
-    simpa [Paxos.module, Reactive.Module.initial] using initial_abs w h
+    simpa [PaxosN.module, Reactive.Module.initial] using initial_abs w h
   | @step w w' _ h ih =>
     have h : Step w w' := by simpa [module, Reactive.Module.step] using h
     obtain ⟨inv, areach⟩ := ih
     rcases (step_iff w w').mp h with rfl | ⟨i, inp, al, rfl⟩
     · exact ⟨inv, areach⟩
-    · obtain ⟨inv', astep⟩ := good_step w inv (Paxos.reachable_invariant _ areach) i inp al
-      exact ⟨inv', .step areach (by simpa [Paxos.module, Reactive.Module.step] using astep)⟩
+    · obtain ⟨inv', astep⟩ := good_step w inv (PaxosN.reachable_invariant _ areach) i inp al
+      exact ⟨inv', .step areach (by simpa [PaxosN.module, Reactive.Module.step] using astep)⟩
 
 /-- Refinement: every reachable deployment state interprets as a reachable
-    state of the abstract single-decree Paxos model. -/
-theorem refinement (w : World) (h : Reactive.Reachable module w) :
-    Reactive.Reachable Paxos.module (abs w) := (reachable_inv w h).2
+    state of the abstract single-decree Paxos model over `N` acceptors. -/
+theorem refinement [Cluster N] (w : World N) (h : Reactive.Reachable (module N) w) :
+    Reactive.Reachable (PaxosN.module N) (abs w) := (reachable_inv w h).2
 
-/-- A replica's decision is backed by a quorum of acceptor votes. -/
-theorem decided_chosen (w : World) (h : Reactive.Reachable module w) (k : Rid) (v : U64)
-    (hd : (w.node k).decided = .Some v) : ∃ b, Paxos.Chosen (abs w) b v.val := by
-  obtain ⟨q, b, hq⟩ := ((reachable_inv w h).1.1 k).decided v hd
-  exact ⟨b, q, hq⟩
+/-- A replica's decision is backed by a majority quorum of acceptor votes. -/
+theorem decided_chosen [Cluster N] (w : World N) (h : Reactive.Reachable (module N) w)
+    (k : Fin N) (v : U64) (hd : (w.node k).decided = .Some v) :
+    ∃ b, PaxosN.Chosen N (abs w) b v.val := by
+  obtain ⟨q, b, hq, hm⟩ := ((reachable_inv w h).1.1 k).decided v hd
+  exact ⟨b, q, hq, hm⟩
 
 /-- Agreement: no two replicas ever decide different values. -/
-def Agreement (w : World) : Prop :=
+def Agreement (w : World N) : Prop :=
   ∀ i j u v, (w.node i).decided = .Some u → (w.node j).decided = .Some v → u = v
 
-theorem agreement : ∀ w, Reactive.Reachable module w → Agreement w := by
+theorem agreement [Cluster N] : ∀ w : World N, Reactive.Reachable (module N) w → Agreement w := by
   intro w h i j u v hu hv
   obtain ⟨b, hb⟩ := decided_chosen w h i u hu
   obtain ⟨c, hc⟩ := decided_chosen w h j v hv
-  exact UScalar.eq_of_val_eq (Paxos.safety _ (refinement w h) b c _ _ hb hc)
+  exact UScalar.eq_of_val_eq (PaxosN.safety _ (refinement w h) b c _ _ hb hc)
 
 /-- Only a client submission produces a `Request` message. -/
 theorem request_only_from_submit (n : Node) (inp : Input) (s : Send) (v : U64)
@@ -67,9 +76,9 @@ theorem request_only_from_submit (n : Node) (inp : Input) (s : Send) (v : U64)
     split at h
     · split at h
       · cases h
-      · rcases start_cases n with ⟨_, e⟩ | ⟨_, e, _⟩ <;> rw [e] at h <;> cases h <;> cases hm
+      · rcases start_cases n with ⟨_, e⟩ | ⟨_, _, e, _⟩ <;> rw [e] at h <;> cases h <;> cases hm
     · split at h
-      · rcases start_cases n with ⟨_, e⟩ | ⟨_, e, _⟩ <;> rw [e] at h <;> cases h <;> cases hm
+      · rcases start_cases n with ⟨_, e⟩ | ⟨_, _, e, _⟩ <;> rw [e] at h <;> cases h <;> cases hm
       · split at h <;> cases h <;> cases hm
   | Deliver src msg =>
     exfalso
@@ -81,15 +90,16 @@ theorem request_only_from_submit (n : Node) (inp : Input) (s : Send) (v : U64)
       (try subst h) <;> simp_all
 
 /-- Validity: every decided value was submitted by a client. -/
-def Validity (w : World) : Prop :=
+def Validity (w : World N) : Prop :=
   ∀ k v, (w.node k).decided = .Some v → ∃ p, w.net p ∧ p.send.msg = .Request v
 
-theorem validity : ∀ w, Reactive.Reachable module w → Validity w := by
+theorem validity [Cluster N] : ∀ w : World N, Reactive.Reachable (module N) w → Validity w := by
   intro w h k v hd
   obtain ⟨inv, areach⟩ := reachable_inv w h
-  obtain ⟨b, q, hq⟩ := decided_chosen w h k v hd
-  have ainv := Paxos.reachable_invariant _ areach
-  obtain ⟨p, hp, vt, hmsg, _, hval⟩ := ainv.voted _ _ _ (hq q.first (.inl rfl))
+  obtain ⟨b, q, hq, hm⟩ := decided_chosen w h k v hd
+  have ainv := PaxosN.reachable_invariant _ areach
+  obtain ⟨a, ha⟩ := PaxosN.quorum_nonempty hq
+  obtain ⟨p, hp, vt, hmsg, _, hval⟩ := ainv.voted _ _ _ (hm a ha)
   have pi := inv.2 p hp
   simp only [PacketInv, hmsg] at pi
   obtain ⟨_, _, _, _, r, hr, hreq⟩ := pi

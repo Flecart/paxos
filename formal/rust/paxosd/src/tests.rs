@@ -31,15 +31,19 @@ fn addressed(p: &Packet, to: u8) -> bool {
 /// The verified network model: every emitted packet is retained forever and
 /// may be delivered any number of times, in any order, or never.
 struct World {
-    nodes: [Node; 3],
+    nodes: Vec<Node>,
     net: Vec<Packet>,
     submitted: Vec<u64>,
 }
 
 impl World {
     fn new() -> World {
+        World::sized(3)
+    }
+
+    fn sized(n: u8) -> World {
         World {
-            nodes: [Node::new(0), Node::new(1), Node::new(2)],
+            nodes: (0..n).map(|i| Node::new(i, n)).collect(),
             net: Vec::new(),
             submitted: Vec::new(),
         }
@@ -151,30 +155,44 @@ fn preempted_leader_retries_and_keeps_chosen_value() {
 
 #[test]
 fn malformed_inputs_are_ignored_without_panicking() {
-    let mut n = Node::new(1);
-    let before = n;
+    let mut n = Node::new(1, 3);
+    let before = n.clone();
     assert!(n
         .handle(Input::Deliver { from: 3, msg: Msg::Prepare { ballot: 5 } })
         .is_none());
     assert!(n == before);
-    let mut n = Node::new(2);
+    let mut n = Node::new(2, 3);
     n.max_seen = u64::MAX;
     n.ballot = 5;
     assert!(n.handle(Input::Tick).is_none(), "ballot space exhausted");
-    let mut n = Node::new(255);
+    let mut n = Node::new(255, 255);
     n.value = Some(1);
     n.handle(Input::Tick);
-    assert_eq!(n.ballot, 3 + 255);
+    assert_eq!(n.ballot, 255 + 255);
+    // Vectors shorter than the cluster size (never produced by `new`) are tolerated.
+    let mut n = Node::new(0, 3);
+    n.promises.clear();
+    n.votes.clear();
+    n.ballot = 3;
+    n.value = Some(1);
+    let v = Vote { ballot: 3, value: 1 };
+    assert!(n.handle(Input::Deliver { from: 2, msg: Msg::Promise { ballot: 3, accepted: None } }).is_none());
+    assert!(n.handle(Input::Deliver { from: 2, msg: Msg::Accepted { vote: v } }).is_none());
+    let mut n = Node::new(0, 0);
+    n.value = Some(1);
+    assert!(n.handle(Input::Tick).is_none(), "empty cluster");
 }
 
 #[test]
 fn ballot_allocation_is_owned_and_increasing() {
-    for floor in [0u64, 1, 2, 3, 4, 5, 1000, BALLOT_LIMIT - 1] {
-        for id in 0..3u8 {
-            let b = next_ballot(floor, id);
-            assert!(b > floor);
-            assert_eq!(b % 3, id as u64);
-            assert!(b <= floor + 5);
+    for n in [1u8, 2, 3, 5, 255] {
+        for floor in [0u64, 1, 2, 3, 4, 5, 1000, BALLOT_LIMIT - 1] {
+            for id in 0..n {
+                let b = next_ballot(floor, id, n);
+                assert!(b > floor);
+                assert_eq!(b % n as u64, id as u64);
+                assert!(b < floor + 2 * n as u64);
+            }
         }
     }
 }
@@ -185,10 +203,11 @@ fn ballot_allocation_is_owned_and_increasing() {
 fn randomized_schedules_preserve_safety_and_decide_after_stabilization() {
     for seed in 1..=300u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-        let mut w = World::new();
+        let size = [1u8, 2, 3, 4, 5, 7][rng.below(6) as usize];
+        let mut w = World::sized(size);
         let chaos = 50 + rng.below(400);
         for _ in 0..chaos {
-            let i = rng.below(3) as u8;
+            let i = rng.below(size as u64) as u8;
             match rng.below(10) {
                 0 => w.apply(i, Input::Submit { value: rng.below(5) }),
                 1 | 2 => w.apply(i, Input::Tick),
@@ -201,12 +220,17 @@ fn randomized_schedules_preserve_safety_and_decide_after_stabilization() {
             }
             w.check_safety();
         }
-        // Stabilization: one leader with a client value, one crashed replica,
-        // fair delivery among the other two, and a periodic timer at the leader.
-        let leader = rng.below(3) as u8;
-        let crashed = (leader + 1 + rng.below(2) as u8) % 3;
+        // Stabilization: one leader with a client value, a crashed minority,
+        // fair delivery among the rest, and a periodic timer at the leader.
+        let leader = rng.below(size as u64) as u8;
+        let mut crashed: Vec<u8> = Vec::new();
+        for i in 0..size {
+            if i != leader && (crashed.len() + 1) * 2 < size as usize && rng.below(2) == 0 {
+                crashed.push(i);
+            }
+        }
         w.apply(leader, Input::Submit { value: 99 });
-        let quorum: Vec<u8> = (0..3).filter(|&i| i != crashed).collect();
+        let quorum: Vec<u8> = (0..size).filter(|i| !crashed.contains(i)).collect();
         let mut rounds = 0;
         while quorum.iter().any(|&i| w.nodes[i as usize].decided.is_none()) {
             rounds += 1;
@@ -214,7 +238,7 @@ fn randomized_schedules_preserve_safety_and_decide_after_stabilization() {
             w.apply(leader, Input::Tick);
             let mut k = 0;
             while k < w.net.len() {
-                if w.net[k].src != crashed {
+                if !crashed.contains(&w.net[k].src) {
                     for &i in &quorum {
                         w.deliver(i, k);
                     }

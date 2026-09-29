@@ -5,48 +5,48 @@ import UserVerification.Local
 namespace PaxosSystem
 open CoreModels Aeneas Aeneas.Std RustM deployable_paxos PaxosNode RMVerify
 
+variable {N : Nat}
+
 /-! ## Frame lemmas -/
 
-@[simp] theorem after_self (w : World) (i : Rid) (r : Opt Send × Node) :
-    (w.after i r).node i = r.2 := by simp [World.after, Paxos.put]
+@[simp] theorem after_self (w : World N) (i : Fin N) (r : Opt Send × Node) :
+    (w.after i r).node i = r.2 := by simp [World.after, PaxosN.put]
 
-theorem after_other (w : World) {i k : Rid} (r : Opt Send × Node) (h : k ≠ i) :
-    (w.after i r).node k = w.node k := by simp [World.after, Paxos.put, h]
+theorem after_other (w : World N) {i k : Fin N} (r : Opt Send × Node) (h : k ≠ i) :
+    (w.after i r).node k = w.node k := by simp [World.after, PaxosN.put, h]
 
-theorem after_node (w : World) (i k : Rid) (r : Opt Send × Node) :
+theorem after_node (w : World N) (i k : Fin N) (r : Opt Send × Node) :
     (w.after i r).node k = if k = i then r.2 else w.node k := by
-  simp [World.after, Paxos.put]
+  simp [World.after, PaxosN.put]
 
-@[simp] theorem after_net (w : World) (i : Rid) (r : Opt Send × Node) (p : Packet) :
+@[simp] theorem after_net (w : World N) (i : Fin N) (r : Opt Send × Node) (p : Packet N) :
     (w.after i r).net p ↔ w.net p ∨ (r.1 = .Some p.send ∧ p.src = i) := Iff.rfl
 
-theorem net_grows (w : World) (i : Rid) (r : Opt Send × Node) (p : Packet) (h : w.net p) :
+theorem net_grows (w : World N) (i : Fin N) (r : Opt Send × Node) (p : Packet N) (h : w.net p) :
     (w.after i r).net p := .inl h
 
-theorem sent_new (w : World) (i : Rid) (s : Send) (n : Node) :
+theorem sent_new (w : World N) (i : Fin N) (s : Send) (n : Node) :
     (w.after i (.Some s, n)).net ⟨i, s⟩ := .inr ⟨rfl, rfl⟩
 
-theorem top_grows (w : World) (i : Rid) (r : Opt Send × Node) (g : Grows (w.node i) r.2) :
+theorem top_grows (w : World N) (i : Fin N) (r : Opt Send × Node) (g : Grows (w.node i) r.2) :
     top w ≤ top (w.after i r) := by
   have h : ∀ k, (w.node k).ballot.val ≤ ((w.after i r).node k).ballot.val := by
     intro k; rw [after_node]; split
     · subst k; exact g.ballot
     · exact le_refl _
-  unfold top
-  have := h 0; have := h 1; have := h 2
-  omega
+  exact Finset.sup_mono_fun (fun k _ => h k)
 
-theorem world_ext {w w' : World} (hn : w.node = w'.node) (hp : ∀ p, w.net p ↔ w'.net p) :
+theorem world_ext {w w' : World N} (hn : w.node = w'.node) (hp : ∀ p, w.net p ↔ w'.net p) :
     w = w' := by
   cases w; cases w'; simp only at hn; subst hn
   congr; funext p; exact propext (hp p)
 
-theorem after_noop (w : World) (i : Rid) : w.after i (.None, w.node i) = w := by
+theorem after_noop (w : World N) (i : Fin N) : w.after i (.None, w.node i) = w := by
   apply world_ext
   · funext k; rw [after_node]; split <;> simp_all
   · intro p; simp
 
-theorem after_dup (w : World) (i : Rid) (s : Send) (h : w.net ⟨i, s⟩) :
+theorem after_dup (w : World N) (i : Fin N) (s : Send) (h : w.net ⟨i, s⟩) :
     w.after i (.Some s, w.node i) = w := by
   apply world_ext
   · funext k; rw [after_node]; split <;> simp_all
@@ -60,20 +60,24 @@ theorem after_dup (w : World) (i : Rid) (s : Send) (h : w.net ⟨i, s⟩) :
 
 /-! ## Monotonicity of the invariant -/
 
-theorem abs_votes_grow (w : World) (i : Rid) (r : Opt Send × Node) {a b v}
+theorem abs_votes_grow (w : World N) (i : Fin N) (r : Opt Send × Node) {a b v}
     (h : (abs w).votes a b v) : (abs (w.after i r)).votes a b v := by
   obtain ⟨p, hp, rest⟩ := h; exact ⟨p, .inl hp, rest⟩
 
-theorem NodeInv.mono {w w' : World} {k : Rid} (h : NodeInv w k) (hn : w'.node k = w.node k)
+theorem NodeInv.mono {w w' : World N} {k : Fin N} (h : NodeInv w k) (hn : w'.node k = w.node k)
     (hnet : ∀ p, w.net p → w'.net p) (htop : top w ≤ top w') : NodeInv w' k := by
-  obtain ⟨id, own, started, proposed, slots, pending, promised_top, seen_top, request, votes,
-    undecided, decided⟩ := h
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> rw [hn]
+  obtain ⟨id, size, plen, vlen, own, started, proposed, slot_le, slots, pending, promised_top,
+    seen_top, request, votes, undecided, decided⟩ := h
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> rw [hn]
   · exact id
+  · exact size
+  · exact plen
+  · exact vlen
   · exact own
   · intro hb; obtain ⟨a, b⟩ := started hb; exact ⟨a, hnet _ b⟩
   · intro v hv; obtain ⟨a, b⟩ := proposed v hv; exact ⟨a, hnet _ b⟩
-  · intro j y hj; obtain ⟨p, a, b⟩ := slots j y hj; exact ⟨p, hnet _ a, b⟩
+  · exact slot_le
+  · intro j y hj hb; obtain ⟨p, a, b⟩ := slots j y hj hb; exact ⟨p, hnet _ a, b⟩
   · exact pending
   · omega
   · omega
@@ -81,13 +85,14 @@ theorem NodeInv.mono {w w' : World} {k : Rid} (h : NodeInv w k) (hn : w'.node k 
   · intro j vt hj; obtain ⟨p, a, b⟩ := votes j vt hj; exact ⟨p, hnet _ a, b⟩
   · exact undecided
   · intro v hv
-    obtain ⟨q, b, hq⟩ := decided v hv
-    refine ⟨q, b, fun a ha => ?_⟩
-    obtain ⟨p, hp, rest⟩ := hq a ha
+    obtain ⟨q, b, hq, hm⟩ := decided v hv
+    refine ⟨q, b, hq, fun a ha => ?_⟩
+    obtain ⟨p, hp, rest⟩ := hm a ha
     exact ⟨p, hnet _ hp, rest⟩
 
-theorem PacketInv.mono (w : World) (i : Rid) (r : Opt Send × Node) (g : Grows (w.node i) r.2)
-    (p : Packet) (h : PacketInv w p) : PacketInv (w.after i r) p := by
+theorem PacketInv.mono [Cluster N] (w : World N) (i : Fin N) (r : Opt Send × Node)
+    (g : Grows (w.node i) r.2) (p : Packet N) (h : PacketInv w p) :
+    PacketInv (w.after i r) p := by
   have ballot : ∀ k, (w.node k).ballot.val ≤ ((w.after i r).node k).ballot.val := by
     intro k; rw [after_node]; split
     · subst k; exact g.ballot
@@ -122,7 +127,7 @@ theorem PacketInv.mono (w : World) (i : Rid) (r : Opt Send × Node) (g : Grows (
 
 /-- Each handler case only needs to establish the updated replica's invariant
     and the invariant of the packet it emits. -/
-theorem inv_after (w : World) (inv : Inv w) (i : Rid) (o : Opt Send) (n' : Node)
+theorem inv_after [Cluster N] (w : World N) (inv : Inv w) (i : Fin N) (o : Opt Send) (n' : Node)
     (g : Grows (w.node i) n') (hnode : NodeInv (w.after i (o, n')) i)
     (hpkt : ∀ s, o = .Some s → PacketInv (w.after i (o, n')) ⟨i, s⟩) :
     Inv (w.after i (o, n')) := by
@@ -136,13 +141,13 @@ theorem inv_after (w : World) (inv : Inv w) (i : Rid) (o : Opt Send) (n' : Node)
 
 /-! ## Abstract state equality -/
 
-theorem state_ext {s t : Paxos.State} (h1 : ∀ a, s.promised a = t.promised a)
+theorem state_ext {s t : PaxosN.State N} (h1 : ∀ a, s.promised a = t.promised a)
     (h2 : ∀ a, s.accepted a = t.accepted a)
     (h3 : ∀ a b x, s.promises a b x ↔ t.promises a b x)
     (h4 : ∀ b v, s.proposals b v ↔ t.proposals b v)
     (h5 : ∀ a b v, s.votes a b v ↔ t.votes a b v) : s = t := by
   cases s; cases t
-  simp only [Paxos.State.mk.injEq]
+  simp only [PaxosN.State.mk.injEq]
   refine ⟨funext h1, funext h2, ?_, ?_, ?_⟩
   · funext a b x; exact propext (h3 a b x)
   · funext b v; exact propext (h4 b v)
@@ -155,7 +160,7 @@ def Hidden : Msg → Prop
   | .Nack _ _ => True
   | _ => False
 
-theorem abs_hidden (w : World) (i : Rid) (o : Opt Send) (n' : Node)
+theorem abs_hidden (w : World N) (i : Fin N) (o : Opt Send) (n' : Node)
     (hp : n'.promised = (w.node i).promised) (ha : n'.accepted = (w.node i).accepted)
     (ho : ∀ s, o = .Some s → Hidden s.msg ∨ w.net ⟨i, s⟩) :
     abs (w.after i (o, n')) = abs w := by
@@ -192,105 +197,111 @@ theorem abs_hidden (w : World) (i : Rid) (o : Opt Send) (n' : Node)
 
 /-- A replica whose proposer and learner state is unchanged keeps its invariant,
     given bounds for its acceptor fields and provenance for a new client value. -/
-theorem NodeInv.congr {w w' : World} {k : Rid} (h : NodeInv w k)
-    (hnet : ∀ p, w.net p → w'.net p) (htop : top w ≤ top w')
-    (hid : (w'.node k).id = (w.node k).id) (hb : (w'.node k).ballot = (w.node k).ballot)
+theorem NodeInv.congr {w w' : World N} {k : Fin N} (h : NodeInv w k)
+    (hnet : ∀ p, w.net p → w'.net p)
+    (hid : (w'.node k).id = (w.node k).id) (hn : (w'.node k).n = (w.node k).n)
+    (hb : (w'.node k).ballot = (w.node k).ballot)
     (hpr : (w'.node k).proposal = (w.node k).proposal)
-    (h0 : (w'.node k).promise0 = (w.node k).promise0) (h1 : (w'.node k).promise1 = (w.node k).promise1)
-    (h2 : (w'.node k).promise2 = (w.node k).promise2)
-    (v0 : (w'.node k).vote0 = (w.node k).vote0) (v1 : (w'.node k).vote1 = (w.node k).vote1)
-    (v2 : (w'.node k).vote2 = (w.node k).vote2) (hd : (w'.node k).decided = (w.node k).decided)
+    (hps : (w'.node k).promises = (w.node k).promises)
+    (hvs : (w'.node k).votes = (w.node k).votes) (hd : (w'.node k).decided = (w.node k).decided)
     (hv : (w.node k).value ≠ .None → (w'.node k).value ≠ .None)
     (hreq : ∀ v, (w'.node k).value = .Some v → ∃ p, w'.net p ∧ p.send.msg = .Request v)
     (hprom : (w'.node k).promised.val ≤ top w') (hseen : (w'.node k).max_seen.val ≤ top w') :
     NodeInv w' k := by
   have hm := h.mono (w' := { node := w.node, net := w'.net }) rfl hnet (le_refl (top w))
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, hprom, hseen, hreq, ?_, ?_, ?_⟩
+  have eps : ∀ j : Fin N, pslot (w'.node k) j = pslot (w.node k) j := by
+    intro j; simp [pslot, hps]
+  have evs : ∀ j : Fin N, vslot (w'.node k) j = vslot (w.node k) j := by
+    intro j; simp [vslot, hvs]
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, hprom, hseen, hreq, ?_, ?_, ?_⟩
   · rw [hid]; exact h.id
+  · rw [hn]; exact h.size
+  · rw [hps]; exact h.plen
+  · rw [hvs]; exact h.vlen
   · rw [hb]; exact h.own
   · intro hb'; rw [hb] at hb' ⊢
     exact ⟨hv (h.started hb').1, hnet _ (h.started hb').2⟩
   · intro v hp; rw [hpr] at hp; rw [hb]; exact hm.proposed v hp
-  · intro j y hj
-    have : pslot (w'.node k) j = pslot (w.node k) j := by simp [pslot, h0, h1, h2]
-    rw [this] at hj; rw [hb]; exact hm.slots j y hj
-  · rw [hpr, h0, h1, h2]; exact h.pending
-  · intro j vt hj
-    have : vslot (w'.node k) j = vslot (w.node k) j := by simp [vslot, v0, v1, v2]
-    rw [this] at hj; exact hm.votes j vt hj
-  · rw [hd, v0, v1, v2]; exact h.undecided
+  · intro j y hj; rw [eps] at hj; rw [hb]; exact h.slot_le j y hj
+  · intro j y hj hy; rw [eps] at hj; rw [hb] at hy; exact hm.slots j y hj hy
+  · rw [hpr, hps, hb, hn]; exact h.pending
+  · intro j vt hj; rw [evs] at hj; exact hm.votes j vt hj
+  · rw [hd, hvs, hn]; exact h.undecided
   · intro v hv'; rw [hd] at hv'
-    obtain ⟨q, b, hq⟩ := h.decided v hv'
-    exact ⟨q, b, fun a ha => by obtain ⟨p, hp, rest⟩ := hq a ha; exact ⟨p, hnet _ hp, rest⟩⟩
+    obtain ⟨q, b, hq, hm⟩ := h.decided v hv'
+    exact ⟨q, b, hq, fun a ha => by obtain ⟨p, hp, rest⟩ := hm a ha; exact ⟨p, hnet _ hp, rest⟩⟩
 
-def quorum01 : Paxos.Quorum := ⟨0, 1, by decide⟩
-def quorum02 : Paxos.Quorum := ⟨0, 2, by decide⟩
-def quorum12 : Paxos.Quorum := ⟨1, 2, by decide⟩
+/-! ## Counting and quorums -/
 
-theorem quorumS_spec (n : Node) (l r : Opt Vote)
-    (h : quorumS n.promise0 n.promise1 n.promise2 = .Some (l, r)) :
-    ∃ q : Paxos.Quorum, pslot n q.first = .Some l ∧ pslot n q.second = .Some r := by
-  unfold quorumS at h
-  split at h <;> simp only [Option.some.injEq, Prod.mk.injEq, reduceCtorEq] at h
-  all_goals obtain ⟨rfl, rfl⟩ := h
-  · exact ⟨quorum12, by simp_all [pslot, quorum12]⟩
-  · exact ⟨quorum02, by simp_all [pslot, quorum02]⟩
-  · exact ⟨quorum01, by simp_all [pslot, quorum01]⟩
+theorem slot_eq_getElem {α : Type} (s : RVec (Opt α)) (j : Nat) (h : j < (items s).length) :
+    slot s j = (items s)[j] := by
+  simp [slot, List.getElem?_eq_getElem h]
 
-theorem quorumS_of_two (n : Node) (q : Paxos.Quorum) (hl : pslot n q.first ≠ .None)
-    (hr : pslot n q.second ≠ .None) : quorumS n.promise0 n.promise1 n.promise2 ≠ .None := by
-  have d := q.distinct
-  have := q.first.isLt; have := q.second.isLt
-  have d' : q.first.val ≠ q.second.val := fun e => d (Fin.ext e)
-  unfold pslot at hl hr
-  cases h0 : n.promise0 <;> cases h1 : n.promise1 <;> cases h2 : n.promise2 <;>
-    simp only [quorumS, ne_eq, reduceCtorEq, not_false_eq_true, not_true_eq_false] <;>
-    (split_ifs at hl hr <;> simp_all <;> omega)
+theorem slot_none_of_ge {α : Type} (s : RVec (Opt α)) (j : Nat) (h : (items s).length ≤ j) :
+    slot s j = .None := by
+  simp [slot, List.getElem?_eq_none h]
 
-theorem same_eq_of (a b : Vote) (h : Same a b) : a = b := by
-  obtain ⟨h1, h2⟩ := h; cases a; cases b; simp_all
+theorem promiseHit_iff (b : U64) (x : Opt Promise) :
+    promiseHit b x = true ↔ ∃ p, x = .Some p ∧ p.ballot = b := by
+  cases x <;> simp [promiseHit]
 
-theorem agreedS_cases (v0 v1 v2 : Opt Vote) (x : U64) (h : agreedS v0 v1 v2 = .Some x) :
-    (∃ a, v0 = .Some a ∧ v1 = .Some a ∧ a.value = x) ∨
-    (∃ a, v0 = .Some a ∧ v2 = .Some a ∧ a.value = x) ∨
-    (∃ a, v1 = .Some a ∧ v2 = .Some a ∧ a.value = x) := by
-  cases v0 <;> cases v1 <;> cases v2 <;> simp only [agreedS] at h <;> (repeat' split at h) <;>
-    simp only [Option.some.injEq, reduceCtorEq] at h <;> subst h <;> rename_i hs <;>
-    have e := same_eq_of _ _ hs <;> subst e <;> simp
+theorem voteHit_iff (v : Vote) (x : Opt Vote) :
+    voteHit v x = true ↔ ∃ y, x = .Some y ∧ y.ballot = v.ballot ∧ y.value = v.value := by
+  cases x <;> simp [voteHit]
 
-theorem agreedS_spec (n : Node) (x : U64) (h : agreedS n.vote0 n.vote1 n.vote2 = .Some x) :
-    ∃ (q : Paxos.Quorum) (vt : Vote), vslot n q.first = .Some vt ∧ vslot n q.second = .Some vt ∧
-      vt.value = x := by
-  rcases agreedS_cases _ _ _ x h with ⟨a, h0, h1, hx⟩ | ⟨a, h0, h2, hx⟩ | ⟨a, h1, h2, hx⟩
-  · exact ⟨quorum01, a, by simp [vslot, quorum01, h0], by simp [vslot, quorum01, h1], hx⟩
-  · exact ⟨quorum02, a, by simp [vslot, quorum02, h0], by simp [vslot, quorum02, h2], hx⟩
-  · exact ⟨quorum12, a, by simp [vslot, quorum12, h1], by simp [vslot, quorum12, h2], hx⟩
+theorem count_promises_card (n : Node) (hlen : (items n.promises).length = N) (b : U64) :
+    countPromisesS (items n.promises) b = (promisers (N := N) n b).card := by
+  unfold countPromisesS promisers
+  rw [countP_eq_card _ _ N hlen]
+  congr 1
+  apply Finset.filter_congr
+  intro j _
+  simp only [pslot]; rw [slot_eq_getElem _ _ (by omega)]
 
-theorem agreedS_of_two (n : Node) (q : Paxos.Quorum) (vt : Vote)
-    (hl : vslot n q.first = .Some vt) (hr : vslot n q.second = .Some vt) :
-    agreedS n.vote0 n.vote1 n.vote2 ≠ .None := by
-  have d := q.distinct
-  have := q.first.isLt; have := q.second.isLt
-  have d' : q.first.val ≠ q.second.val := fun e => d (Fin.ext e)
-  have self : Same vt vt := ⟨rfl, rfl⟩
-  unfold vslot at hl hr
-  cases h0 : n.vote0 <;> cases h1 : n.vote1 <;> cases h2 : n.vote2 <;>
-    simp only [agreedS] <;> (split_ifs at hl hr <;> simp_all <;> (try omega)) <;>
-    (split_ifs <;> simp_all)
+theorem count_votes_card (n : Node) (hlen : (items n.votes).length = N) (v : Vote) :
+    countVotesS (items n.votes) v = (voters (N := N) n v).card := by
+  unfold countVotesS voters
+  rw [countP_eq_card _ _ N hlen]
+  congr 1
+  apply Finset.filter_congr
+  intro j _
+  simp only [vslot]; rw [slot_eq_getElem _ _ (by omega)]
 
-theorem selectS_val (l r : Opt Vote) (v : U64) :
-    (selectS l r v).val = Paxos.select (snap l) (snap r) v.val := by
-  cases l <;> cases r <;> simp only [selectS, snap, Paxos.select]
-  rename_i a b
-  by_cases h : a.ballot < b.ballot
-  · have : a.ballot.val < b.ballot.val := by rwa [UScalar.lt_equiv] at h
-    simp [h, this]
-  · have : ¬ a.ballot.val < b.ballot.val := by rwa [UScalar.lt_equiv] at h
-    simp [h, this]
+theorem majority_iff [Cluster N] (c : Nat) : Majority c (u8 N) ↔ N < 2 * c := by
+  unfold Majority; rw [u8_val]; omega
 
-theorem selectS_cases (l r : Opt Vote) (v : U64) :
-    selectS l r v = v ∨ (∃ a, l = .Some a ∧ selectS l r v = a.value) ∨
-      (∃ b, r = .Some b ∧ selectS l r v = b.value) := by
-  cases l <;> cases r <;> simp only [selectS] <;> (try split) <;> simp
+theorem mem_promisers (n : Node) (b : U64) (j : Fin N) :
+    j ∈ promisers n b ↔ ∃ p, pslot n j = .Some p ∧ p.ballot = b := by
+  simp [promisers, promiseHit_iff]
+
+theorem mem_voters (n : Node) (v : Vote) (j : Fin N) :
+    j ∈ voters n v ↔ ∃ y, vslot n j = .Some y ∧ y.ballot = v.ballot ∧ y.value = v.value := by
+  simp [voters, voteHit_iff]
+
+/-- Nothing counts for a ballot above every recorded promise. -/
+theorem count_promises_zero (n : Node) (hlen : (items n.promises).length = N) (b : U64)
+    (h : ∀ (j : Fin N) p, pslot n j = .Some p → p.ballot ≠ b) :
+    countPromisesS (items n.promises) b = 0 := by
+  rw [count_promises_card n hlen, Finset.card_eq_zero, Finset.eq_empty_iff_forall_notMem]
+  intro j hj
+  obtain ⟨p, hp, hb⟩ := (mem_promisers n b j).mp hj
+  exact h j p hp hb
+
+/-- Replacing an entry by a vote other than `v'` does not raise the count of `v'`. -/
+theorem count_votes_set_le (l : List (Opt Vote)) (i : Nat) (v v' : Vote) (hne : v' ≠ v)
+    (hi : i < l.length) : countVotesS (l.set i (.Some v)) v' ≤ countVotesS l v' := by
+  unfold countVotesS
+  rw [List.countP_set hi]
+  have : voteHit v' (.Some v) = false := by
+    simp only [voteHit, decide_eq_false_iff_not]
+    intro ⟨h1, h2⟩; apply hne; cases v; cases v'; simp_all
+  rw [this]; simp only [Bool.false_eq_true, if_false, Nat.add_zero]; omega
+
+theorem count_learn_le (n : Node) (src : U8) (v v' : Vote) (hne : v' ≠ v)
+    (hs : src.val < (items n.votes).length) :
+    countVotesS (items (learnS n src v)) v' ≤ countVotesS (items n.votes) v' := by
+  unfold learnS; split
+  · rw [items_setAt]; exact count_votes_set_le _ _ _ _ hne hs
+  · exact le_refl _
 
 end PaxosSystem

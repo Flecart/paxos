@@ -1,4 +1,4 @@
-//! Process-level tests: three `paxosd` replicas on localhost UDP.
+//! Process-level tests: clusters of `paxosd` replicas on localhost UDP.
 
 use std::net::UdpSocket;
 use std::path::PathBuf;
@@ -14,13 +14,18 @@ struct Cluster {
 }
 
 impl Cluster {
-    fn new(name: &str) -> Cluster {
-        let ports = (0..3)
+    /// A cluster of `size` replicas; none is started yet.
+    fn new(name: &str, size: usize) -> Cluster {
+        let ports = (0..size)
             .map(|_| UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port())
             .collect();
         let dir = std::env::temp_dir().join(format!("paxosd-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        Cluster { ports, dir, children: vec![None, None, None] }
+        Cluster { ports, dir, children: (0..size).map(|_| None).collect() }
+    }
+
+    fn size(&self) -> usize {
+        self.ports.len()
     }
 
     fn addr(&self, i: usize) -> String {
@@ -28,7 +33,7 @@ impl Cluster {
     }
 
     fn start(&mut self, i: usize) {
-        let peers: Vec<String> = (0..3).map(|j| self.addr(j)).collect();
+        let peers: Vec<String> = (0..self.size()).map(|j| self.addr(j)).collect();
         let child = Command::new(env!("CARGO_BIN_EXE_paxosd"))
             .args(["serve", "--id", &i.to_string(), "--peers", &peers.join(",")])
             .args(["--data", self.dir.join(i.to_string()).to_str().unwrap(), "--key", KEY])
@@ -73,7 +78,7 @@ impl Cluster {
 
 impl Drop for Cluster {
     fn drop(&mut self) {
-        for i in 0..3 {
+        for i in 0..self.size() {
             self.kill(i);
         }
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -82,7 +87,7 @@ impl Drop for Cluster {
 
 #[test]
 fn decides_once_and_recovers_from_restart() {
-    let mut c = Cluster::new("basic");
+    let mut c = Cluster::new("basic", 3);
     for i in 0..3 {
         c.start(i);
     }
@@ -100,7 +105,7 @@ fn decides_once_and_recovers_from_restart() {
 
 #[test]
 fn majority_without_the_preferred_leader_decides_and_late_replica_catches_up() {
-    let mut c = Cluster::new("failover");
+    let mut c = Cluster::new("failover", 3);
     c.start(1);
     c.start(2);
     assert_eq!(c.propose(2, 5), "decided 5");
@@ -111,7 +116,7 @@ fn majority_without_the_preferred_leader_decides_and_late_replica_catches_up() {
 
 #[test]
 fn concurrent_conflicting_proposals_agree() {
-    let mut c = Cluster::new("concurrent");
+    let mut c = Cluster::new("concurrent", 3);
     for i in 0..3 {
         c.start(i);
     }
@@ -133,7 +138,7 @@ fn concurrent_conflicting_proposals_agree() {
 
 #[test]
 fn crashes_during_the_protocol_do_not_break_agreement() {
-    let mut c = Cluster::new("crashes");
+    let mut c = Cluster::new("crashes", 3);
     for i in 0..3 {
         c.start(i);
     }
@@ -155,5 +160,44 @@ fn crashes_during_the_protocol_do_not_break_agreement() {
     assert_eq!(proposer.join().unwrap(), "decided 77");
     for i in 0..3 {
         c.await_status(i, "decided 77");
+    }
+}
+
+#[test]
+fn five_replicas_decide_without_the_two_preferred_leaders_and_late_replica_catches_up() {
+    let mut c = Cluster::new("failover5", 5);
+    // Replicas 0 and 1 are down; 2, 3 and 4 form a majority and 2 must lead.
+    for i in 2..5 {
+        c.start(i);
+    }
+    assert_eq!(c.propose(4, 9), "decided 9");
+    for i in 2..5 {
+        c.await_status(i, "decided 9");
+    }
+    c.start(0);
+    c.await_status(0, "decided 9");
+    assert_eq!(c.propose(0, 11), "decided 9");
+}
+
+#[test]
+fn five_replicas_concurrent_conflicting_proposals_agree() {
+    let mut c = Cluster::new("concurrent5", 5);
+    for i in 0..5 {
+        c.start(i);
+    }
+    let answers: Vec<String> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..5)
+            .map(|i| {
+                let c = &c;
+                s.spawn(move || c.propose(i, 200 + i as u64))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(answers.iter().all(|a| a == &answers[0]), "{answers:?}");
+    let allowed: Vec<String> = (200..205).map(|v| format!("decided {v}")).collect();
+    assert!(allowed.contains(&answers[0]), "{answers:?}");
+    for i in 0..5 {
+        c.await_status(i, &answers[0]);
     }
 }

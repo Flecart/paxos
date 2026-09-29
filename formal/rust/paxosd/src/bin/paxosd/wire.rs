@@ -1,7 +1,10 @@
 //! Byte encodings for protocol messages, replica state and client requests.
 //! Decoding rejects truncated input, trailing bytes and unknown tags.
 
-use deployable_paxos::{Dest, Msg, Node, Send, Vote};
+use deployable_paxos::{Dest, Msg, Node, Promise, Send, Vote};
+
+/// Largest cluster size, hence the largest vector length a decoder accepts.
+pub const MAX_REPLICAS: usize = 255;
 
 #[derive(Default)]
 pub struct Writer(pub Vec<u8>);
@@ -9,6 +12,9 @@ pub struct Writer(pub Vec<u8>);
 impl Writer {
     pub fn u8(&mut self, x: u8) {
         self.0.push(x);
+    }
+    pub fn u16(&mut self, x: u16) {
+        self.0.extend_from_slice(&x.to_be_bytes());
     }
     pub fn u32(&mut self, x: u32) {
         self.0.extend_from_slice(&x.to_be_bytes());
@@ -41,12 +47,13 @@ impl Writer {
             }
         }
     }
-    fn slot(&mut self, v: Option<Option<Vote>>) {
-        match v {
+    fn opt_promise(&mut self, p: Option<Promise>) {
+        match p {
             None => self.u8(0),
             Some(p) => {
                 self.u8(1);
-                self.opt_vote(p);
+                self.u64(p.ballot);
+                self.opt_vote(p.accepted);
             }
         }
     }
@@ -87,20 +94,25 @@ impl Writer {
         }
         self.msg(&s.msg);
     }
+    /// Vector lengths are written as u16; callers only store nodes whose
+    /// vectors have at most `MAX_REPLICAS` entries.
     pub fn node(&mut self, n: &Node) {
         self.u8(n.id);
+        self.u8(n.n);
         self.u64(n.promised);
         self.opt_vote(n.accepted);
         self.opt_u64(n.value);
         self.u64(n.ballot);
         self.u64(n.max_seen);
         self.opt_u64(n.proposal);
-        self.slot(n.promise0);
-        self.slot(n.promise1);
-        self.slot(n.promise2);
-        self.opt_vote(n.vote0);
-        self.opt_vote(n.vote1);
-        self.opt_vote(n.vote2);
+        self.u16(n.promises.len() as u16);
+        for p in &n.promises {
+            self.opt_promise(*p);
+        }
+        self.u16(n.votes.len() as u16);
+        for v in &n.votes {
+            self.opt_vote(*v);
+        }
         self.opt_u64(n.decided);
     }
 }
@@ -125,6 +137,9 @@ impl<'a> Reader<'a> {
     }
     pub fn u8(&mut self) -> Option<u8> {
         Some(self.take(1)?[0])
+    }
+    pub fn u16(&mut self) -> Option<u16> {
+        Some(u16::from_be_bytes(self.take(2)?.try_into().ok()?))
     }
     pub fn u32(&mut self) -> Option<u32> {
         Some(u32::from_be_bytes(self.take(4)?.try_into().ok()?))
@@ -152,12 +167,23 @@ impl<'a> Reader<'a> {
             _ => None,
         }
     }
-    fn slot(&mut self) -> Option<Option<Option<Vote>>> {
+    fn opt_promise(&mut self) -> Option<Option<Promise>> {
         match self.u8()? {
             0 => Some(None),
-            1 => Some(Some(self.opt_vote()?)),
+            1 => Some(Some(Promise {
+                ballot: self.u64()?,
+                accepted: self.opt_vote()?,
+            })),
             _ => None,
         }
+    }
+    /// A u16 length prefix, rejected above `MAX_REPLICAS`.
+    fn len(&mut self) -> Option<usize> {
+        let n = self.u16()? as usize;
+        if n > MAX_REPLICAS {
+            return None;
+        }
+        Some(n)
     }
     pub fn msg(&mut self) -> Option<Msg> {
         Some(match self.u8()? {
@@ -179,8 +205,7 @@ impl<'a> Reader<'a> {
     pub fn send(&mut self) -> Option<Send> {
         let to = match self.u8()? {
             0xff => Dest::All,
-            i if i < 3 => Dest::To(i),
-            _ => return None,
+            i => Dest::To(i),
         };
         Some(Send {
             to,
@@ -190,18 +215,29 @@ impl<'a> Reader<'a> {
     pub fn node(&mut self) -> Option<Node> {
         Some(Node {
             id: self.u8()?,
+            n: self.u8()?,
             promised: self.u64()?,
             accepted: self.opt_vote()?,
             value: self.opt_u64()?,
             ballot: self.u64()?,
             max_seen: self.u64()?,
             proposal: self.opt_u64()?,
-            promise0: self.slot()?,
-            promise1: self.slot()?,
-            promise2: self.slot()?,
-            vote0: self.opt_vote()?,
-            vote1: self.opt_vote()?,
-            vote2: self.opt_vote()?,
+            promises: {
+                let len = self.len()?;
+                let mut ps = Vec::with_capacity(len);
+                for _ in 0..len {
+                    ps.push(self.opt_promise()?);
+                }
+                ps
+            },
+            votes: {
+                let len = self.len()?;
+                let mut vs = Vec::with_capacity(len);
+                for _ in 0..len {
+                    vs.push(self.opt_vote()?);
+                }
+                vs
+            },
             decided: self.opt_u64()?,
         })
     }
@@ -237,27 +273,62 @@ mod tests {
         ] {
             roundtrip_send(Send { to: Dest::All, msg });
             roundtrip_send(Send { to: Dest::To(2), msg });
+            roundtrip_send(Send { to: Dest::To(254), msg });
         }
-        assert!(Reader::new(&[3, 1, 0, 0, 0, 0, 0, 0, 0, 1]).send().is_none());
+        // Unknown message tag.
+        assert!(Reader::new(&[3, 9, 0, 0, 0, 0, 0, 0, 0, 1]).send().is_none());
         assert!(Reader::new(&[0xff, 9]).send().is_none());
     }
 
-    #[test]
-    fn node_state_roundtrips() {
-        let mut n = Node::new(2);
-        n.promised = 8;
-        n.accepted = Some(Vote { ballot: 8, value: 1 });
+    fn sample() -> Node {
+        let mut n = Node::new(2, 5);
+        n.promised = 12;
+        n.accepted = Some(Vote { ballot: 12, value: 1 });
         n.value = Some(1);
-        n.ballot = 8;
-        n.promise1 = Some(None);
-        n.promise2 = Some(Some(Vote { ballot: 5, value: 9 }));
+        n.ballot = 12;
+        n.promises[1] = Some(Promise { ballot: 12, accepted: None });
+        n.promises[4] = Some(Promise {
+            ballot: 12,
+            accepted: Some(Vote { ballot: 5, value: 9 }),
+        });
         n.proposal = Some(1);
-        n.vote0 = Some(Vote { ballot: 8, value: 1 });
+        n.votes[0] = Some(Vote { ballot: 12, value: 1 });
+        n.votes[3] = Some(Vote { ballot: 7, value: 2 });
         n.decided = Some(1);
+        n
+    }
+
+    #[test]
+    fn node_state_roundtrips_and_truncations_fail() {
+        let n = sample();
         let mut w = Writer::default();
         w.node(&n);
         let mut r = Reader::new(&w.0);
         assert!(r.node() == Some(n));
         assert!(r.done());
+        for cut in 0..w.0.len() {
+            assert!(Reader::new(&w.0[..cut]).node().is_none(), "cut {cut}");
+        }
+    }
+
+    #[test]
+    fn node_decoding_rejects_bad_lengths_and_entries() {
+        let mut n = Node::new(0, 1);
+        n.promises.clear();
+        n.votes.clear();
+        let mut w = Writer::default();
+        w.node(&n);
+        // Layout: id, n, promised(8), accepted(1), value(1), ballot(8),
+        // max_seen(8), proposal(1), then the promises length.
+        let at = 2 + 8 + 1 + 1 + 8 + 8 + 1;
+        assert_eq!(&w.0[at..at + 2], &[0, 0]);
+        let mut long = w.0.clone();
+        long[at..at + 2].copy_from_slice(&256u16.to_be_bytes());
+        assert!(Reader::new(&long).node().is_none());
+        // One promise entry with an unknown option tag.
+        let mut bad = w.0[..at].to_vec();
+        bad.extend_from_slice(&[0, 1, 7]);
+        bad.extend_from_slice(&w.0[at + 2..]);
+        assert!(Reader::new(&bad).node().is_none());
     }
 }

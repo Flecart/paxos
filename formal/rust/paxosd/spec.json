@@ -1,62 +1,59 @@
 {
   "version": 1,
-  "title": "Deployable three-replica Paxos",
-  "description": "The extracted replica state machine (acceptor, proposer with ballot allocation and nack-driven retry, learner) composed into a three-replica deployment whose network may delay, duplicate, reorder or drop authenticated messages, and whose replicas may crash and restart from storage written before each send. Safety needs no timing assumption. Liveness assumes a stable leader in a live majority, fair delivery among that majority, and ballots below 2^62. Excluded: sockets, codecs and storage code in src/bin, the Rust compiler and the extractor.",
-  "imports": ["UserVerification.Liveness"],
-  "support": ["Paxos"],
-  "system": {
-    "module": "PaxosSystem.module",
-    "assumptions": ["PaxosSystem.Live"]
-  },
+  "title": "Deployable N-replica Paxos",
+  "description": "The extracted replica state machine (acceptor, proposer with ballot allocation and nack-driven retry, learner) composed into a deployment of any N replicas (1 ≤ N ≤ 255, majority quorums) whose network may delay, duplicate, reorder or drop authenticated messages, and whose replicas may crash and restart from storage written before each send. Safety needs no timing assumption. Liveness assumes a stable leader in a live majority, fair delivery within that majority, and ballots below 2^62 − 2N. Excluded: sockets, codecs and storage code in src/bin, the Rust compiler and the extractor.",
+  "imports": [
+    "UserVerification.Liveness"
+  ],
   "claims": [
     {
       "name": "no_panic",
       "kind": "lean",
-      "description": "The extracted transition function returns normally for every replica state and every input, including malformed sender ids and exhausted ballots.",
+      "description": "The extracted transition function returns normally for every replica state and every input, including malformed sender ids, vectors of the wrong length, an empty cluster and exhausted ballots; its loops terminate.",
       "statement": "∀ (n : deployable_paxos.Node) (i : deployable_paxos.Input), ∃ r, deployable_paxos.Node.handle n i = Aeneas.Std.RustM.ok r",
       "proof": "PaxosNode.no_panic"
     },
     {
       "name": "refinement",
       "kind": "lean",
-      "description": "Every reachable deployment state interprets as a reachable state of the abstract single-decree Paxos model.",
-      "statement": "∀ w, RMVerify.Reactive.Reachable PaxosSystem.module w → RMVerify.Reactive.Reachable RMVerify.Paxos.module (PaxosSystem.abs w)",
-      "proof": "PaxosSystem.refinement"
+      "description": "For every cluster size, every reachable deployment state interprets as a reachable state of the abstract majority-quorum Paxos model.",
+      "statement": "∀ (N : Nat) [PaxosSystem.Cluster N] (w : PaxosSystem.World N), RMVerify.Reactive.Reachable (PaxosSystem.module N) w → RMVerify.Reactive.Reachable (PaxosN.module N) (PaxosSystem.abs w)",
+      "proof": "by intro N _ w h; exact PaxosSystem.refinement w h"
     },
     {
       "name": "agreement",
-      "kind": "invariant",
-      "description": "No two replicas ever decide different values.",
-      "predicate": "PaxosSystem.Agreement",
-      "proof": "PaxosSystem.agreement"
+      "kind": "lean",
+      "description": "For every cluster size, no two replicas ever decide different values, in every reachable state.",
+      "statement": "∀ (N : Nat) [PaxosSystem.Cluster N], RMVerify.Spec.Invariant (PaxosSystem.module N) PaxosSystem.Agreement",
+      "proof": "by intro N _; exact PaxosSystem.agreement"
     },
     {
       "name": "validity",
-      "kind": "invariant",
-      "description": "Every decided value was submitted by a client.",
-      "predicate": "PaxosSystem.Validity",
-      "proof": "PaxosSystem.validity"
+      "kind": "lean",
+      "description": "For every cluster size, every decided value was submitted by a client.",
+      "statement": "∀ (N : Nat) [PaxosSystem.Cluster N], RMVerify.Spec.Invariant (PaxosSystem.module N) PaxosSystem.Validity",
+      "proof": "by intro N _; exact PaxosSystem.validity"
     },
     {
       "name": "eventual_decision",
-      "kind": "eventually",
-      "description": "Under the environment assumptions, every replica of some majority decides.",
-      "predicate": "PaxosSystem.QuorumDecided",
-      "proof": "PaxosSystem.eventually_quorum_decided"
+      "kind": "lean",
+      "description": "For every cluster size, in every execution satisfying the environment assumptions (Live), every replica of some majority eventually decides.",
+      "statement": "∀ (N : Nat) [PaxosSystem.Cluster N], RMVerify.Spec.Eventually (PaxosSystem.module N) PaxosSystem.Live PaxosSystem.QuorumDecided",
+      "proof": "by intro N _; exact PaxosSystem.eventually_quorum_decided"
     },
     {
       "name": "liveness",
       "kind": "lean",
-      "description": "For the leader L, live majority Q and stabilisation time T of the assumptions, every member of Q decides at or after T.",
-      "statement": "∀ run, RMVerify.Reactive.Execution PaxosSystem.module run → ∀ L Q T, PaxosSystem.Fair run L Q T → RMVerify.Reactive.Eventually (fun w => ∀ c, RMVerify.Paxos.Member c Q → (w.node c).decided ≠ .None) run T",
-      "proof": "PaxosSystem.liveness"
+      "description": "For the leader L, live majority Q and stabilisation time T of the assumptions (Fair), every member of Q decides at or after T.",
+      "statement": "∀ (N : Nat) [PaxosSystem.Cluster N] (run : Nat → PaxosSystem.World N), RMVerify.Reactive.Execution (PaxosSystem.module N) run → ∀ L Q T, PaxosSystem.Fair run L Q T → RMVerify.Reactive.Eventually (fun w => ∀ c ∈ Q, (w.node c).decided ≠ .None) run T",
+      "proof": "by intro N _ run exec L Q T live; exact PaxosSystem.liveness run exec L Q T live"
     },
     {
       "name": "fairness_needed",
       "kind": "lean",
-      "description": "Liveness is not vacuous in the other direction: without the assumptions, a legal idle execution never decides.",
-      "statement": "∀ w, PaxosSystem.Initial w → RMVerify.Reactive.Execution PaxosSystem.module (fun _ => w) ∧ ¬ RMVerify.Reactive.Eventually (fun w => ∃ c, (w.node c).decided ≠ .None) (fun _ => w)",
-      "proof": "PaxosSystem.idle_never_decides"
+      "description": "Without the assumptions, a legal idle execution never decides, so the liveness premises are not idle.",
+      "statement": "∀ (N : Nat) [PaxosSystem.Cluster N] (w : PaxosSystem.World N), PaxosSystem.Initial w → RMVerify.Reactive.Execution (PaxosSystem.module N) (fun _ => w) ∧ ¬ RMVerify.Reactive.Eventually (fun w => ∃ c, (w.node c).decided ≠ .None) (fun _ => w)",
+      "proof": "by intro N _ w h; exact PaxosSystem.idle_never_decides w h"
     }
   ]
 }

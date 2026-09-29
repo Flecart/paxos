@@ -17,7 +17,7 @@ fn show(m: &Msg) -> String {
     }
 }
 
-fn step(nodes: &mut [Node; 3], net: &mut VecDeque<(u8, u8, Msg)>, i: u8, input: Input, label: &str) {
+fn step(nodes: &mut [Node], net: &mut VecDeque<(u8, u8, Msg)>, i: u8, input: Input, label: &str) {
     let out = nodes[i as usize].handle(input);
     let n = &nodes[i as usize];
     print!("r{i} <- {label:34}");
@@ -25,7 +25,7 @@ fn step(nodes: &mut [Node; 3], net: &mut VecDeque<(u8, u8, Msg)>, i: u8, input: 
         Some(Send { to, msg }) => {
             let dest = match to { Dest::All => "all".to_string(), Dest::To(j) => format!("r{j}") };
             print!(" -> {:34} to {dest}", show(&msg));
-            for j in 0..3u8 {
+            for j in 0..nodes.len() as u8 {
                 if matches!(to, Dest::All) || to == Dest::To(j) { net.push_back((i, j, msg)); }
             }
         }
@@ -34,7 +34,7 @@ fn step(nodes: &mut [Node; 3], net: &mut VecDeque<(u8, u8, Msg)>, i: u8, input: 
     println!("  [promised={} ballot={} decided={:?}]", n.promised, n.ballot, n.decided);
 }
 
-fn run(nodes: &mut [Node; 3], net: &mut VecDeque<(u8, u8, Msg)>, down: Option<u8>) {
+fn run(nodes: &mut [Node], net: &mut VecDeque<(u8, u8, Msg)>, down: Option<u8>) {
     while let Some((from, to, msg)) = net.pop_front() {
         if Some(to) == down || Some(from) == down { continue; }
         step(nodes, net, to, Input::Deliver { from, msg }, &format!("{} from r{from}", show(&msg)));
@@ -42,7 +42,7 @@ fn run(nodes: &mut [Node; 3], net: &mut VecDeque<(u8, u8, Msg)>, down: Option<u8
 }
 
 fn main() {
-    let mut nodes = [Node::new(0), Node::new(1), Node::new(2)];
+    let mut nodes: Vec<Node> = (0..3).map(|i| Node::new(i, 3)).collect();
     let mut net = VecDeque::new();
     println!("== client submits 42 at r2; r0 leads");
     step(&mut nodes, &mut net, 2, Input::Submit { value: 42 }, "Submit(42)");
