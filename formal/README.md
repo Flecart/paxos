@@ -6,6 +6,8 @@ records the intended architecture, proof boundaries, tooling, and first usabilit
 The [Rust-to-Lean pipeline](rust/README.md) accepts `(crate / .rs / ZIP, statements.json)`
 and includes implementation-backed safety and conditional-liveness proofs for a
 three-acceptor Rust Paxos core. Run `python3 formal/rust_verify.py formal/rust/paxos`.
+[Deployable Paxos](rust/paxosd/README.md) verifies a complete three-replica service
+(safety unconditionally, liveness under stated fairness) and includes a UDP runtime.
 The Python workflow documented below remains supported.
 Use the [general specification interface](rust/SPECIFICATIONS.md) for new protocols;
 the [agent skill](skills/write-verification-spec/SKILL.md) explains how to write and

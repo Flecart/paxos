@@ -92,6 +92,16 @@ class RustPipelineTests(unittest.TestCase):
         legacy = engine.load_request(engine.ROOT / 'formal/rust/requests-paxos.json')
         self.assertEqual([c['name'] for c in compile_request(legacy)['claims']], ['safety', 'liveness'])
 
+    def test_deployable_paxos_spec_separates_safety_from_liveness_assumptions(self):
+        spec = engine.load_request(engine.discover_spec(engine.ROOT / 'formal/rust/paxosd'))
+        claims = {c['name']: c for c in compile_request(spec)['claims']}
+        for name in ('agreement', 'validity'):
+            self.assertEqual(claims[name]['kind'], 'invariant')
+            self.assertEqual(claims[name]['assumptions'], [])
+        self.assertEqual(claims['eventual_decision']['assumptions'], ['PaxosSystem.Live'])
+        self.assertIn('PaxosSystem.Fair run L Q T', claims['liveness']['statement'])
+        self.assertIn('deployable_paxos.Node.handle', claims['no_panic']['statement'])
+
     def test_spec_discovery_preview_and_toml_json_equivalence(self):
         source = engine.ROOT / 'formal/rust/delivery'
         spec = engine.load_request(engine.discover_spec(source))
@@ -152,6 +162,23 @@ class RustPipelineTests(unittest.TestCase):
             self.assertEqual(stalled['status'], 'unknown', stalled)
             self.assertRegex((Path(stalled['evidence']) / 'build.log').read_text(),
                              r"'PaxosBridge\.liveness' depends on axioms: \[[^\]]*sorryAx")
+
+    @unittest.skipUnless(os.environ.get('RMVERIFY_RUST_INTEGRATION') == '1', 'requires pinned extraction tools')
+    def test_deployable_paxos_safety_liveness_replay_and_mutation(self):
+        with tempfile.TemporaryDirectory(dir=engine.ROOT / '.rmverify') as tmp:
+            root = Path(tmp)
+            source = engine.ROOT / 'formal/rust/paxosd'
+            result = engine.verify(source, None, root / 'evidence', timeout=900)
+            self.assertEqual(result['status'], 'proved', result)
+            self.assertEqual(engine.recheck(result['evidence'])['rechecked'], 7)
+            mutant = engine.unpack(source, root / 'mutant')
+            path = mutant / 'src/lib.rs'
+            # A proposer that ignores the votes reported in promises is unsafe.
+            path.write_text(path.read_text().replace(
+                'let value = select(left, right, offered);', 'let value = offered;'))
+            broken = engine.verify(mutant, None, root / 'evidence', timeout=900)
+            self.assertEqual(broken['status'], 'unknown', broken)
+            self.assertIn('Node.lean', (Path(broken['evidence']) / 'build.log').read_text())
 
     @unittest.skipUnless(os.environ.get('RMVERIFY_RUST_INTEGRATION') == '1', 'requires pinned extraction tools')
     def test_delivery_temporal_claims_and_unfair_refutation(self):

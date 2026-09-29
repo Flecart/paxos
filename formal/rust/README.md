@@ -9,8 +9,14 @@ The [specification interface](SPECIFICATIONS.md) supports `invariant`, `always`,
 `eventually`, `leads_to`, and arbitrary Lean propositions. New protocols supply
 their own `spec.toml` or `spec.json` and `verification/*.lean`; no driver changes are needed.
 The [agent skill](../skills/write-verification-spec/SKILL.md) teaches this workflow.
-Examples include [delivery](delivery/spec.toml), [Paxos](paxos/spec.json), and
-[Pedersen commitments](pedersen/README.md).
+Examples include [delivery](delivery/spec.toml), [Paxos](paxos/spec.json),
+[deployable Paxos](paxosd/README.md), and [Pedersen commitments](pedersen/README.md).
+
+[`paxosd`](paxosd/README.md) is the deployable version. It verifies a complete replica state
+machine (ballot allocation, preemption retry, learner) composed into a three-replica
+deployment with a lossy network and crash/restart. It proves agreement and validity
+without assumptions, and liveness under a stable-leader, fair-delivery environment,
+and it ships a std-only UDP runtime with durable storage.
 
 ## Run
 
@@ -131,7 +137,8 @@ Ghost histories retain sent messages, allowing the environment to model repeated
 delivery; they are not mutable application data used to make protocol decisions.
 
 **Verification scope:** this is the Rust protocol library composed through its
-stated interface. It does not verify the old Python `PaxosNode`, sockets, the
+stated interface. For the full replica with ballot allocation, retry, and a runtime,
+see [`paxosd`](paxosd/README.md). It does not verify the old Python `PaxosNode`, sockets, the
 executable demo's transport, persistent storage, crash/restart recovery, ballot
 allocation, or code outside the extracted library. The compiler/extraction
 boundary remains trusted; this is not a verified Rust compiler. Ordinary Rust
