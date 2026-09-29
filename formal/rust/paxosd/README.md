@@ -24,6 +24,10 @@ $BIN propose --node 127.0.0.1:7000 7      # prints "decided 42": single decree
 $BIN status  --node 127.0.0.1:7001
 ```
 
+To watch the verified state machine itself, `cargo run --example trace` prints
+every input, emitted message, and replica state for a normal decision and a
+failover in which the new leader must re-propose the earlier value.
+
 Options: `--tick-ms` (default 50) sets the protocol timer and heartbeats, and
 `--suspect-ms` (default 600) sets how long a replica waits before assuming a
 lower-numbered replica has failed. Kill and restart any replica at any time; it
